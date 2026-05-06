@@ -28,6 +28,17 @@ Current version: 0.0.0
 - Prepares the package shape for reuse from browser applications and VS Code
   Webviews.
 
+### Validation Policy
+
+- Keeps local certificate investigation separate from network-assisted
+  validation in both the UI and API.
+- Performs structural certificate analysis locally by default, without silent
+  CRL, OCSP, AIA, or issuer-certificate fetching.
+- Treats network-assisted checks as explicit operations controlled by the user
+  or host application.
+- Reports the external validation resources that may be used before or while an
+  online check runs.
+
 ### Application Shell
 
 - Provides a dedicated UI surface for certificate investigation tasks.
