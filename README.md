@@ -47,6 +47,21 @@ Current version: 0.0.0
 - Follows the PKI Studio family style so certificate tools can feel consistent
   with related modules.
 
+### Three-Pane Layout
+
+- Uses the same broad layout model as related PKI Studio gadgets, with a
+  certificate tree on the left, a selected-item detail view on the right, and an
+  operation log pane at the bottom.
+- Treats each loaded certificate as a top-level tree item, with certificate
+  attributes, extensions, validation data, and related analysis nodes as child
+  items.
+- Changes the right pane according to the selected tree item, using specialized
+  certificate views where useful.
+- Falls back to a PkiStudioJS-style DER tree viewer when the selected item is
+  best represented by the DER bytes that encode it.
+- Records processing activity in the bottom log pane, and always leaves a log
+  trace for operations that perform network access.
+
 ## Development
 
 This repository is currently private and in early preparation. Project
