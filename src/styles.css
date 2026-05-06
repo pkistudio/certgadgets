@@ -24,6 +24,12 @@
   --leaf: #f7f7f7;
   --leaf-edge: #8b8b8b;
   --leaf-fold: #dcdcdc;
+  --certificate-seal: #2f6fb7;
+  --certificate-seal-edge: #1d4f87;
+  --certificate-ribbon: #8db7ee;
+  --attribute-line: #6b7480;
+  --attribute-knob: #ffffff;
+  --attribute-knob-edge: #5f6b78;
   --danger: #b91c1c;
   --field-bg: #ffffff;
   --dialog-overlay: rgba(15, 23, 42, 0.2);
@@ -65,6 +71,12 @@
     --leaf: #dadde3;
     --leaf-edge: #8d96a3;
     --leaf-fold: #aeb5bf;
+    --certificate-seal: #7db3ff;
+    --certificate-seal-edge: #4d82c2;
+    --certificate-ribbon: #bdd6ff;
+    --attribute-line: #a7b0bd;
+    --attribute-knob: #242830;
+    --attribute-knob-edge: #a7b0bd;
     --danger: #ff9b9b;
     --field-bg: #20242b;
     --dialog-overlay: rgba(0, 0, 0, 0.48);
@@ -106,6 +118,12 @@
   --leaf: #dadde3;
   --leaf-edge: #8d96a3;
   --leaf-fold: #aeb5bf;
+  --certificate-seal: #7db3ff;
+  --certificate-seal-edge: #4d82c2;
+  --certificate-ribbon: #bdd6ff;
+  --attribute-line: #a7b0bd;
+  --attribute-knob: #242830;
+  --attribute-knob-edge: #a7b0bd;
   --danger: #ff9b9b;
   --field-bg: #20242b;
   --dialog-overlay: rgba(0, 0, 0, 0.48);
@@ -191,6 +209,44 @@ button:disabled {
   border-radius: 0;
   padding: 4px;
   background: linear-gradient(var(--chrome-start), var(--chrome));
+}
+
+.menu-group {
+  position: relative;
+}
+
+.submenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 190px;
+  border: 1px solid var(--control-border);
+  border-radius: 3px;
+  padding: 3px;
+  background: var(--panel);
+  box-shadow: 0 8px 20px var(--shadow-strong);
+}
+
+.submenu[hidden] {
+  display: none;
+}
+
+.submenu button {
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.submenu button:hover,
+.submenu button:focus-visible {
+  border-color: var(--hover-border);
+  background: var(--hover-bg);
+  outline: none;
 }
 
 .toolbar strong {
@@ -464,6 +520,54 @@ button:disabled {
   background: linear-gradient(135deg, transparent 0 18%, var(--leaf-fold) 19% 26%, var(--leaf) 27%);
 }
 
+.tree-icon.certificate::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0;
+  width: 10px;
+  height: 12px;
+  border: 1px solid var(--leaf-edge);
+  background: linear-gradient(135deg, transparent 0 18%, var(--leaf-fold) 19% 26%, var(--leaf) 27%);
+}
+
+.tree-icon.certificate::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--certificate-seal-edge);
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, var(--certificate-ribbon), var(--certificate-seal) 68%);
+  box-shadow: -2px 4px 0 -2px var(--certificate-ribbon), 2px 4px 0 -2px var(--certificate-ribbon);
+}
+
+.tree-icon.attribute::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 3px;
+  width: 13px;
+  height: 1px;
+  background: var(--attribute-line);
+  box-shadow: 0 6px 0 var(--attribute-line);
+}
+
+.tree-icon.attribute::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  width: 4px;
+  height: 4px;
+  border: 1px solid var(--attribute-knob-edge);
+  border-radius: 50%;
+  background: var(--attribute-knob);
+  box-shadow: 6px 6px 0 -1px var(--attribute-knob), 6px 6px 0 0 var(--attribute-knob-edge);
+}
+
 .tree-item {
   display: flex;
   flex: 1 1 auto;
@@ -511,6 +615,19 @@ button:disabled {
   overflow: hidden;
   border: 1px solid var(--panel-border);
   background: var(--panel);
+}
+
+.detail-content,
+.pkistudio-viewer-mount {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.detail-content[hidden],
+.pkistudio-viewer-mount[hidden] {
+  display: none;
 }
 
 .empty-detail,

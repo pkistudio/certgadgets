@@ -1,4 +1,5 @@
 import './styles.css';
+import PkiStudio, { type PkiStudioViewerInstance } from 'pkistudiojs/viewer';
 import {
   CertGadgetsCore,
   type CertificateDocument,
@@ -6,11 +7,23 @@ import {
   type NetworkValidationPlan
 } from './core';
 
+const PKISTUDIO_OIDS_URL = new URL('../node_modules/pkistudiojs/app/static/oids.json', import.meta.url).href;
+
 declare global {
   interface Window {
     CertGadgetsCore?: typeof CertGadgetsCore;
+    showSaveFilePicker?: (options?: SaveFilePickerOptions) => Promise<SaveFileHandle>;
   }
 }
+
+type SaveFilePickerOptions = {
+  suggestedName?: string;
+  types?: Array<{ description: string; accept: Record<string, string[]> }>;
+};
+
+type SaveFileHandle = {
+  createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+};
 
 export type AppTheme = 'light' | 'dark';
 
@@ -23,12 +36,17 @@ export type InitCertificateGadgetsOptions = {
   mount?: string | Element;
   theme?: AppTheme;
   host?: CertificateGadgetsHost;
+  certificate?: {
+    bytes: Uint8Array;
+    sourceName?: string;
+  };
 };
 
 export type CertificateGadgetsAppInstance = {
   readonly certificates: readonly CertificateDocument[];
   readonly selectedNode: CertificateTreeNode | null;
   loadDemoCertificate: () => void;
+  loadCertificateBytes: (bytes: Uint8Array, sourceName?: string) => void;
   close: () => void;
 };
 
@@ -49,7 +67,22 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
         <section class="panel certificate-panel" aria-label="Certificates">
           <nav class="certificate-menu" aria-label="Certificate actions">
             <button id="loadDemoButton" type="button">Demo</button>
-            <button id="openCertificateButton" type="button">Open</button>
+            <div class="menu-group">
+              <button id="toggleLoadMenuButton" type="button" aria-haspopup="menu" aria-expanded="false">Load</button>
+              <div id="loadMenu" class="submenu" role="menu" hidden>
+                <button id="loadFromFileButton" type="button" role="menuitem">from File</button>
+                <button id="loadClipboardPemButton" type="button" role="menuitem">from Clipboard as PEM</button>
+                <button id="loadClipboardHexButton" type="button" role="menuitem">from Clipboard as HEX</button>
+              </div>
+            </div>
+            <div class="menu-group">
+              <button id="toggleSaveMenuButton" type="button" aria-haspopup="menu" aria-expanded="false">Save</button>
+              <div id="saveMenu" class="submenu" role="menu" hidden>
+                <button id="saveDerFileButton" type="button" role="menuitem">to File as DER</button>
+                <button id="savePemFileButton" type="button" role="menuitem">to File as PEM</button>
+              </div>
+            </div>
+            <button id="closeDocumentButton" type="button">Close</button>
             <button id="onlineCheckButton" type="button">Online Check</button>
             <input id="certificateInput" class="visually-hidden" type="file" accept=".cer,.crt,.der,.pem,application/pkix-cert,application/x-x509-ca-cert" />
           </nav>
@@ -59,7 +92,10 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
           </section>
         </section>
         <div id="paneResizer" class="pane-resizer" role="separator" aria-label="Resize panes" aria-orientation="vertical" tabindex="0"></div>
-        <section id="detailPane" class="detail-panel" aria-label="Selected certificate item"></section>
+        <section id="detailPane" class="detail-panel" aria-label="Selected certificate item">
+          <div id="detailContent" class="detail-content"></div>
+          <div id="viewerMount" class="pkistudio-viewer-mount" hidden></div>
+        </section>
       </section>
       <div id="apiLogResizer" class="api-log-resizer" role="separator" aria-label="Resize operation log" aria-orientation="horizontal" tabindex="0"></div>
       <section class="api-log-panel panel" aria-label="Operation log">
@@ -85,11 +121,21 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   const aboutDialog = query<HTMLDialogElement>(app, '#aboutDialog');
   const closeAboutButton = query<HTMLButtonElement>(app, '#closeAboutButton');
   const loadDemoButton = query<HTMLButtonElement>(app, '#loadDemoButton');
-  const openCertificateButton = query<HTMLButtonElement>(app, '#openCertificateButton');
+  const toggleLoadMenuButton = query<HTMLButtonElement>(app, '#toggleLoadMenuButton');
+  const toggleSaveMenuButton = query<HTMLButtonElement>(app, '#toggleSaveMenuButton');
+  const loadMenu = query<HTMLDivElement>(app, '#loadMenu');
+  const saveMenu = query<HTMLDivElement>(app, '#saveMenu');
+  const loadFromFileButton = query<HTMLButtonElement>(app, '#loadFromFileButton');
+  const loadClipboardPemButton = query<HTMLButtonElement>(app, '#loadClipboardPemButton');
+  const loadClipboardHexButton = query<HTMLButtonElement>(app, '#loadClipboardHexButton');
+  const saveDerFileButton = query<HTMLButtonElement>(app, '#saveDerFileButton');
+  const savePemFileButton = query<HTMLButtonElement>(app, '#savePemFileButton');
+  const closeDocumentButton = query<HTMLButtonElement>(app, '#closeDocumentButton');
   const onlineCheckButton = query<HTMLButtonElement>(app, '#onlineCheckButton');
   const certificateInput = query<HTMLInputElement>(app, '#certificateInput');
   const certificateTree = query<HTMLElement>(app, '#certificateTree');
-  const detailPane = query<HTMLElement>(app, '#detailPane');
+  const detailContent = query<HTMLElement>(app, '#detailContent');
+  const viewerMount = query<HTMLElement>(app, '#viewerMount');
   const formNotice = query<HTMLElement>(app, '#formNotice');
   const workspace = query<HTMLElement>(app, '.workspace');
   const paneResizer = query<HTMLElement>(app, '#paneResizer');
@@ -100,13 +146,16 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
   let certificateDocuments: CertificateDocument[] = [];
   let selectedNodeId: string | null = null;
+  let viewer: PkiStudioViewerInstance | null = null;
 
   applyRequestedTheme(options.theme);
   setupPaneResizer(workspace, paneResizer);
   setupApiLogResizer(app, workspace, apiLogPanel, apiLogList, apiLogResizer);
+  bootViewer();
   logOperation(apiLogList, 'ready', 'Waiting for certificate activity.');
-  renderEmptyDetail(detailPane);
+  renderEmptyDetail(detailContent);
   updateActions();
+  if (options.certificate) loadCertificateBytes(options.certificate.bytes, options.certificate.sourceName ?? 'external.der');
 
   aboutButton.addEventListener('click', () => {
     aboutDialog.showModal();
@@ -122,7 +171,32 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
   loadDemoButton.addEventListener('click', () => loadCertificate(CertGadgetsCore.createDemoCertificate(), 'Demo certificate loaded.'));
 
-  openCertificateButton.addEventListener('click', () => certificateInput.click());
+  toggleLoadMenuButton.addEventListener('click', () => toggleTopMenu(loadMenu, toggleLoadMenuButton, saveMenu, toggleSaveMenuButton));
+  toggleSaveMenuButton.addEventListener('click', () => toggleTopMenu(saveMenu, toggleSaveMenuButton, loadMenu, toggleLoadMenuButton));
+  loadFromFileButton.addEventListener('click', () => {
+    hideTopMenus();
+    certificateInput.click();
+  });
+  loadClipboardPemButton.addEventListener('click', async () => {
+    hideTopMenus();
+    await loadCertificateFromClipboard('pem');
+  });
+  loadClipboardHexButton.addEventListener('click', async () => {
+    hideTopMenus();
+    await loadCertificateFromClipboard('hex');
+  });
+  saveDerFileButton.addEventListener('click', async () => {
+    hideTopMenus();
+    await saveSelectedDerFile();
+  });
+  savePemFileButton.addEventListener('click', async () => {
+    hideTopMenus();
+    await saveSelectedCertificatePemFile();
+  });
+  closeDocumentButton.addEventListener('click', () => {
+    hideTopMenus();
+    closeLoadedCertificates();
+  });
 
   certificateInput.addEventListener('change', async () => {
     const [file] = certificateInput.files ?? [];
@@ -143,12 +217,31 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     selectNode(button.dataset.nodeId ?? '');
   });
 
+  document.addEventListener('click', (event) => {
+    if (!(event.target instanceof Node) || app.contains(event.target)) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('.menu-group')) return;
+    }
+    hideTopMenus();
+  });
+
+  function bootViewer(): void {
+    try {
+      viewer = PkiStudio.init({ mount: viewerMount, oidUrl: PKISTUDIO_OIDS_URL });
+      applyEmbeddedViewerStyles(viewer);
+      logOperation(apiLogList, 'pkistudiojs.init', `Viewer ${PkiStudio.version ?? '(unknown version)'} mounted.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logOperation(apiLogList, 'pkistudiojs.init', message, 'error');
+    }
+  }
+
   async function loadCertificateFile(file: File): Promise<void> {
     setNotice(`Opening ${file.name}...`);
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       logOperation(apiLogList, 'File.read', `Read ${file.name} (${bytes.byteLength} bytes).`);
-      loadCertificate(CertGadgetsCore.createCertificateFromBytes(bytes, file.name), `Loaded ${file.name}.`);
+      tryLoadCertificateBytes(bytes, file.name, `Loaded ${file.name}.`, 'File.validate');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setNotice(message, true);
@@ -156,14 +249,91 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     }
   }
 
+  async function loadCertificateFromClipboard(format: 'pem' | 'hex'): Promise<void> {
+    try {
+      const text = await readTextFromClipboard();
+      const bytes = format === 'pem' ? new TextEncoder().encode(text) : hexToBytes(text);
+      logOperation(apiLogList, `Clipboard.readText.${format.toUpperCase()}`, `Read ${text.length} characters.`);
+      tryLoadCertificateBytes(bytes, `clipboard.${format}`, `Loaded certificate from clipboard ${format.toUpperCase()}.`, `Clipboard.validate.${format.toUpperCase()}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNotice(message, true);
+      logOperation(apiLogList, `Clipboard.readText.${format.toUpperCase()}`, message, 'error');
+    }
+  }
+
   function loadCertificate(document: CertificateDocument, notice: string): void {
-    certificateDocuments = [document, ...certificateDocuments.filter((item) => item.id !== document.id)];
+    const previousDocument = certificateDocuments[0] ?? null;
+    if (previousDocument) {
+      viewer?.close();
+      logOperation(apiLogList, 'Certificate.close', `${previousDocument.sourceName} was closed before loading ${document.sourceName}.`);
+    }
+    certificateDocuments = [document];
     selectedNodeId = document.root.id;
     renderCertificateTree();
     showSelectedNode();
     setNotice(notice);
-    logOperation(apiLogList, 'Certificate.load', `${document.sourceName} added to the tree (${document.size} bytes).`);
+    logOperation(apiLogList, 'Certificate.load', `${document.sourceName} loaded as the only certificate item (${document.size} bytes).`);
     updateActions();
+  }
+
+  function loadCertificateBytes(bytes: Uint8Array, sourceName = 'external.der'): void {
+    tryLoadCertificateBytes(bytes, sourceName, `Loaded ${sourceName}.`, 'Certificate.validate');
+  }
+
+  function tryLoadCertificateBytes(bytes: Uint8Array, sourceName: string, notice: string, operation: string): boolean {
+    try {
+      const document = CertGadgetsCore.createCertificateFromBytes(bytes, sourceName);
+      logOperation(apiLogList, operation, `${sourceName} was accepted as an X.509 certificate.`);
+      loadCertificate(document, notice);
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const message = `${sourceName} is not a readable X.509 certificate.`;
+      setNotice(message, true);
+      logOperation(apiLogList, operation, `${message} ${detail}`, 'error');
+      return false;
+    }
+  }
+
+  function closeLoadedCertificates(): void {
+    certificateDocuments = [];
+    selectedNodeId = null;
+    renderCertificateTree();
+    viewer?.close();
+    showDetailContent();
+    renderEmptyDetail(detailContent);
+    setNotice('Closed loaded certificates.');
+    logOperation(apiLogList, 'Certificate.close', 'Closed all loaded certificate documents.');
+    updateActions();
+  }
+
+  async function saveSelectedDerFile(): Promise<void> {
+    const node = selectedNodeId ? findNode(selectedNodeId) : null;
+    const bytes = node?.derBytes;
+    if (!node || !bytes) {
+      setNotice('Select a DER-backed certificate item before saving.', true);
+      logOperation(apiLogList, 'DER.save', 'No DER-backed tree item was selected.', 'error');
+      return;
+    }
+    const filename = `${node.label.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'certificate-item'}.der`;
+    await saveBytesToFile(bytes, filename);
+    setNotice(`Saved ${node.label} as ${filename}.`);
+    logOperation(apiLogList, 'DER.save', `Saved ${node.label} (${bytes.byteLength} bytes).`);
+  }
+
+  async function saveSelectedCertificatePemFile(): Promise<void> {
+    const document = getSelectedCertificate();
+    const bytes = document?.root.derBytes;
+    if (!document || !bytes) {
+      setNotice('Load a certificate before saving PEM.', true);
+      logOperation(apiLogList, 'PEM.save', 'No certificate was loaded.', 'error');
+      return;
+    }
+    const filename = `${createSafeFileBase(document.sourceName || document.label) || 'certificate'}.pem`;
+    await saveTextToFile(derToPem(bytes), filename, 'application/x-pem-file', [{ description: 'PEM files', accept: { 'application/x-pem-file': ['.pem', '.crt', '.cer'] } }]);
+    setNotice(`Saved ${document.label} as ${filename}.`);
+    logOperation(apiLogList, 'PEM.save', `Saved ${document.sourceName} as PEM (${bytes.byteLength} DER bytes).`);
   }
 
   async function runOnlineCheck(document: CertificateDocument): Promise<void> {
@@ -221,24 +391,50 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     selectedNodeId = nodeId;
     renderCertificateTree();
     showSelectedNode();
+    updateActions();
   }
 
   function showSelectedNode(): void {
     const node = selectedNodeId ? findNode(selectedNodeId) : null;
     if (!node) {
-      renderEmptyDetail(detailPane);
+      showDetailContent();
+      renderEmptyDetail(detailContent);
       return;
     }
 
-    if (node.view === 'summary') renderSummaryDetail(detailPane, node);
-    else if (node.view === 'extension') renderExtensionDetail(detailPane, node);
-    else if (node.view === 'validation') renderValidationDetail(detailPane, node);
-    else if (node.view === 'network') renderNetworkDetail(detailPane, node);
-    else renderDerDetail(detailPane, node);
+    if (node.view === 'der') showDerViewer(node);
+    else {
+      showDetailContent();
+      if (node.view === 'summary') renderSummaryDetail(detailContent, node);
+      else if (node.view === 'extension') renderExtensionDetail(detailContent, node);
+      else if (node.view === 'validation') renderValidationDetail(detailContent, node);
+      else if (node.view === 'network') renderNetworkDetail(detailContent, node);
+    }
   }
 
   function updateActions(): void {
     onlineCheckButton.disabled = certificateDocuments.length === 0;
+    saveDerFileButton.disabled = !Boolean(selectedNodeId && findNode(selectedNodeId)?.derBytes);
+    savePemFileButton.disabled = certificateDocuments.length === 0;
+    closeDocumentButton.disabled = certificateDocuments.length === 0;
+  }
+
+  function showDerViewer(node: CertificateTreeNode): void {
+    const bytes = node.derBytes;
+    if (!bytes || !viewer) {
+      showDetailContent();
+      renderSummaryDetail(detailContent, node);
+      return;
+    }
+    detailContent.hidden = true;
+    viewerMount.hidden = false;
+    viewer.loadBytes(bytes, `${node.label} (${bytes.byteLength} bytes)`);
+    logOperation(apiLogList, 'pkistudiojs.loadBytes', `${node.label} (${bytes.byteLength} bytes).`);
+  }
+
+  function showDetailContent(): void {
+    viewerMount.hidden = true;
+    detailContent.hidden = false;
   }
 
   function getSelectedCertificate(): CertificateDocument | null {
@@ -270,7 +466,9 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     loadDemoCertificate() {
       loadCertificate(CertGadgetsCore.createDemoCertificate(), 'Demo certificate loaded.');
     },
+    loadCertificateBytes,
     close() {
+      viewer?.close();
       app.replaceChildren();
     }
   };
@@ -279,7 +477,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 function renderTreeNode(node: CertificateTreeNode, depth: number, selectedNodeId: string | null): string {
   const selected = node.id === selectedNodeId;
   const hasChildren = Boolean(node.children?.length);
-  const iconClass = depth === 0 || hasChildren ? 'folder' : 'leaf';
+  const iconClass = getTreeIconClass(node, depth, hasChildren);
   const note = node.note ? ` <span class="tree-note">${escapeHtml(node.note)}</span>` : '';
   const children = hasChildren ? `<div class="tree-children">${node.children!.map((child) => renderTreeNode(child, depth + 1, selectedNodeId)).join('')}</div>` : '';
   return `
@@ -294,6 +492,21 @@ function renderTreeNode(node: CertificateTreeNode, depth: number, selectedNodeId
       ${children}
     </details>
   `;
+}
+
+function getTreeIconClass(node: CertificateTreeNode, depth: number, hasChildren: boolean): string {
+  if (node.kind === 'certificate') return 'certificate';
+  if (isAttributeNode(node)) return 'attribute';
+  return depth === 0 || hasChildren ? 'folder' : 'leaf';
+}
+
+function isAttributeNode(node: CertificateTreeNode): boolean {
+  return node.kind === 'subject' ||
+    node.kind === 'issuer' ||
+    node.kind === 'validity' ||
+    node.kind === 'public-key' ||
+    node.kind === 'signature' ||
+    node.kind === 'extension';
 }
 
 function renderEmptyDetail(detailPane: HTMLElement): void {
@@ -360,20 +573,6 @@ function renderNetworkDetail(detailPane: HTMLElement, node: CertificateTreeNode)
   `;
 }
 
-function renderDerDetail(detailPane: HTMLElement, node: CertificateTreeNode): void {
-  detailPane.innerHTML = `
-    <section class="der-viewer" data-certgadgets-selected-node="${escapeHtml(node.id)}">
-      <header class="viewer-menu">
-        <strong>${escapeHtml(node.label)}</strong>
-        <span>${node.derBytes?.byteLength ?? 0} bytes</span>
-      </header>
-      <div class="asn-tree" role="tree">
-        ${renderMockDerTree(node)}
-      </div>
-    </section>
-  `;
-}
-
 function renderDetailList(node: CertificateTreeNode): string {
   const details = node.details ?? [];
   if (details.length === 0) return '<p class="detail-note">No structured details are available yet.</p>';
@@ -389,23 +588,121 @@ function renderDerPreview(node: CertificateTreeNode): string {
   return `<pre class="hex-preview">${escapeHtml(CertGadgetsCore.bytesToHexPreview(node.derBytes))}</pre>`;
 }
 
-function renderMockDerTree(node: CertificateTreeNode): string {
-  const bytes = node.derBytes ?? new Uint8Array();
-  const length = bytes.byteLength;
-  return `
-    <details class="asn-node" open>
-      <summary><span class="asn-tag">SEQUENCE</span><span class="asn-meta">len ${length}</span></summary>
-      <div class="asn-children">
-        <details class="asn-node" open>
-          <summary><span class="asn-tag">OBJECT</span><span class="asn-value">${escapeHtml(node.label)}</span></summary>
-        </details>
-        <details class="asn-node" open>
-          <summary><span class="asn-tag">OCTET STRING</span><span class="asn-meta">${length} bytes</span></summary>
-          <pre>${escapeHtml(CertGadgetsCore.bytesToHexPreview(bytes))}</pre>
-        </details>
-      </div>
-    </details>
+function toggleTopMenu(openMenu: HTMLElement, openButton: HTMLButtonElement, otherMenu: HTMLElement, otherButton: HTMLButtonElement): void {
+  const willOpen = openMenu.hidden;
+  otherMenu.hidden = true;
+  otherButton.setAttribute('aria-expanded', 'false');
+  openMenu.hidden = !willOpen;
+  openButton.setAttribute('aria-expanded', String(willOpen));
+}
+
+function hideTopMenus(): void {
+  for (const menu of document.querySelectorAll<HTMLElement>('.certificate-menu .submenu')) menu.hidden = true;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('.certificate-menu [aria-haspopup="menu"]')) button.setAttribute('aria-expanded', 'false');
+}
+
+async function readTextFromClipboard(): Promise<string> {
+  if (!navigator.clipboard?.readText || !window.isSecureContext) throw new Error('Clipboard reading is not available in this browser context.');
+  return navigator.clipboard.readText();
+}
+
+function hexToBytes(text: string): Uint8Array {
+  const hex = text.replace(/[^0-9a-f]/gi, '');
+  if (hex.length === 0 || hex.length % 2 !== 0) throw new Error('Clipboard HEX input must contain an even number of hex digits.');
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  return bytes;
+}
+
+async function saveBytesToFile(bytes: Uint8Array, fileName: string): Promise<void> {
+  const blob = new Blob([toArrayBuffer(bytes)], { type: 'application/pkix-cert' });
+  await saveBlobToFile(blob, fileName, [{ description: 'DER files', accept: { 'application/octet-stream': ['.der', '.cer'] } }]);
+}
+
+async function saveTextToFile(text: string, fileName: string, mimeType: string, types: SaveFilePickerOptions['types']): Promise<void> {
+  await saveBlobToFile(new Blob([text], { type: mimeType }), fileName, types);
+}
+
+async function saveBlobToFile(blob: Blob, fileName: string, types: SaveFilePickerOptions['types']): Promise<void> {
+  if (window.showSaveFilePicker && window.isSecureContext) {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: fileName,
+      types
+    });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return;
+  }
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function derToPem(bytes: Uint8Array): string {
+  const base64 = bytesToBase64(bytes);
+  const lines = base64.match(/.{1,64}/g) ?? [];
+  return `-----BEGIN CERTIFICATE-----\n${lines.join('\n')}\n-----END CERTIFICATE-----\n`;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function createSafeFileBase(value: string): string {
+  return value.toLowerCase().replace(/\.[a-z0-9]+$/i, '').replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function applyEmbeddedViewerStyles(instance: PkiStudioViewerInstance): void {
+  if (!instance.root) return;
+  const style = document.createElement('style');
+  style.textContent = `
+    :host,
+    main {
+      width: 100% !important;
+      height: 100% !important;
+      min-height: 0 !important;
+      overflow: hidden !important;
+      background: transparent !important;
+    }
+
+    main {
+      display: flex !important;
+      flex-direction: column !important;
+      margin: 0 !important;
+      padding: 0 !important;
+    }
+
+    .card {
+      flex: 1 1 auto !important;
+      min-height: 0 !important;
+      border-right: 0 !important;
+      border-left: 0 !important;
+      border-radius: 0 !important;
+      box-shadow: none !important;
+      overflow: hidden !important;
+    }
+
+    .viewer {
+      flex: 1 1 auto !important;
+      min-height: 0 !important;
+      max-height: none !important;
+    }
   `;
+  if (instance.root instanceof ShadowRoot) instance.root.prepend(style);
+  else instance.root.prepend(style);
 }
 
 function findNodeInTree(node: CertificateTreeNode, nodeId: string): CertificateTreeNode | null {
