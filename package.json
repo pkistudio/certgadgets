@@ -1,0 +1,62 @@
+{
+  "name": "@pkistudio/certgadgets",
+  "version": "0.0.0",
+  "description": "Browser certificate investigation tools and reusable Certificate Gadgets API.",
+  "type": "module",
+  "main": "./dist/core.js",
+  "module": "./dist/core.js",
+  "types": "./dist/types/core.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/core.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./core": {
+      "types": "./dist/types/core.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./app": {
+      "types": "./dist/types/app.d.ts",
+      "import": "./dist/app.js"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": [
+    "*.css"
+  ],
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.types.json",
+    "preview": "vite preview --host 0.0.0.0",
+    "check": "tsc --noEmit",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pkistudio/certgadgets"
+  },
+  "keywords": [
+    "pki",
+    "certificate",
+    "x509",
+    "crl",
+    "ocsp"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  },
+  "dependencies": {
+    "asn1js": "^3.0.10",
+    "pkijs": "^3.4.0",
+    "pkistudiojs": "^0.4.1",
+    "pvtsutils": "^1.3.6"
+  }
+}

@@ -11,7 +11,7 @@ Current version: 0.0.0
 
 ### Certificate Investigation
 
-- Loads certificate data for inspection and analysis.
+- Loads DER and PEM certificate data for inspection and analysis.
 - Shows certificate identity, issuer, validity, public key, and extension
   details in a certificate-focused UI.
 - Highlights certificate structure in a form that can be reused by PKI Studio
@@ -22,6 +22,7 @@ Current version: 0.0.0
 ### Analysis API
 
 - Exposes certificate parsing and analysis helpers as a UI-independent API.
+- Parses X.509 certificate fields and extensions with PKIjs and ASN.1 helpers.
 - Uses PkiStudioJS internally for shared PKI and ASN.1 behavior.
 - Keeps host-specific behavior, file access, and Webview lifecycle outside the
   core module.
@@ -64,14 +65,59 @@ Current version: 0.0.0
 
 ## Development
 
-This repository is currently private and in early preparation. Project
-scaffolding, package scripts, and public API entry points will be added as the
-module takes shape.
+This repository is currently private and in early preparation.
+
+Install dependencies:
+
+```sh
+npm install
+```
+
+Start the local development server:
+
+```sh
+npm run dev
+```
+
+Run the TypeScript and production build checks:
+
+```sh
+npm run check
+npm run build
+```
 
 ## Reusing from npm
 
-The npm package is not published yet. The intended package will expose a
+The npm package is not published yet. The intended package exposes a
 certificate-analysis API and a browser/Webview application initializer.
+
+Use the UI-independent API:
+
+```ts
+import { CertGadgetsCore } from '@pkistudio/certgadgets';
+
+const certificate = CertGadgetsCore.createDemoCertificate();
+const plans = CertGadgetsCore.collectNetworkValidationPlans(certificate);
+```
+
+Mount the browser application from an embedded Webview or browser app:
+
+```ts
+import { initCertificateGadgets } from '@pkistudio/certgadgets/app';
+import '@pkistudio/certgadgets/styles.css';
+
+initCertificateGadgets({
+  mount: '#app',
+  host: {
+    confirmNetworkAccess: async ({ url }) => window.confirm(`Allow ${url}?`),
+    fetchNetworkResource: async ({ url }) => {
+      const response = await fetch(url);
+      const bytes = await response.arrayBuffer();
+      return { status: response.status, byteLength: bytes.byteLength };
+    }
+  }
+});
+```
 
 ## License
 
@@ -80,7 +126,7 @@ Certificate Gadgets is licensed under the MIT License. See [LICENSE](LICENSE).
 ## PkiStudioJS Dependency
 
 The application is expected to import PkiStudioJS from the PKI Studio JavaScript
-package:
+package for shared ASN.1 viewer behavior:
 
 - `pkistudiojs/core`
 - `pkistudiojs/oid-resolver`
@@ -88,3 +134,5 @@ package:
 
 The exact import surface will be finalized as the certificate-analysis API is
 implemented.
+
+X.509 certificate parsing is handled by PKIjs, with ASN.1 support from asn1js.
