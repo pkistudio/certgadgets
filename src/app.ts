@@ -1,4 +1,5 @@
 import './styles.css';
+import * as asn1js from 'asn1js';
 import PkiStudio, { type PkiStudioViewerInstance } from 'pkistudiojs/viewer';
 import {
   CertGadgetsCore,
@@ -457,12 +458,13 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     try {
       transcript.push(createTranscriptLine('Network access approved. Sending request.'));
       const result = await fetchNetworkResource(plan);
-      const status: ValidationResultStatus = result.status >= 200 && result.status < 400 ? 'OK' : 'NG';
+      const contentAssessment = assessValidationContent(plan, result);
+      const status: ValidationResultStatus = isHttpSuccess(result.status) && contentAssessment.status !== 'NG' ? 'OK' : 'NG';
       const byteLength = getNetworkResultByteLength(result);
       transcript.push(createTranscriptLine(`Received HTTP status ${result.status}.`));
       transcript.push(createTranscriptLine(`Received ${byteLength} bytes.`));
-      transcript.push(...createValidationFollowUpTranscript(plan, result));
-      updateValidationResult(resultId, status, `${plan.operation} completed with HTTP status ${result.status}; received ${byteLength} bytes from ${plan.url}.`, transcript.join('\n'), createValidationArtifacts(plan, result));
+      transcript.push(...contentAssessment.transcript);
+      updateValidationResult(resultId, status, createValidationResultSummary(plan, result, byteLength, contentAssessment), transcript.join('\n'), createValidationArtifacts(plan, result));
       setNotice(`${target} validation finished with ${status}.`, status === 'NG');
       logOperation(apiLogList, plan.operation, `${plan.url} -> status ${result.status}, ${byteLength} bytes.`, status === 'NG' ? 'error' : 'ok');
     } catch (error) {
@@ -667,10 +669,14 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     const artifact = result?.artifacts.find((item) => item.id === artifactId);
     if (!result || !artifact) return;
 
+    const artifactLabel = `${artifact.direction} ${artifact.label}`;
+    const viewerBytes = prepareArtifactBytesForViewer(artifact.bytes, artifactLabel);
+    if (!viewerBytes) return;
+
     const key = `certgadgets-validation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const payload = {
-      label: `${artifact.direction} ${artifact.label}`,
-      bytes: bytesToBase64(artifact.bytes)
+      label: viewerBytes.label,
+      bytes: bytesToBase64(viewerBytes.bytes)
     };
 
     try {
@@ -691,7 +697,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
       return;
     }
     artifactWindow.opener = null;
-    logOperation(apiLogList, 'Validation.openViewer', `${artifact.label} opened in ASN.1 viewer.`);
+    logOperation(apiLogList, 'Validation.openViewer', `${viewerBytes.label} opened in ASN.1 viewer.`);
   }
 
   return {
@@ -988,6 +994,30 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function prepareArtifactBytesForViewer(bytes: Uint8Array, label: string): { bytes: Uint8Array; label: string } | null {
+  if (canDecodeAsn1(bytes)) return { bytes, label };
+
+  const confirmed = window.confirm('ASN.1 デコードできなかったけど、とにかく OCTET STRING に包んで表示させるけどいいか？');
+  if (!confirmed) return null;
+  return {
+    bytes: wrapBytesInOctetString(bytes),
+    label: `${label} (wrapped OCTET STRING)`
+  };
+}
+
+function canDecodeAsn1(bytes: Uint8Array): boolean {
+  try {
+    const parsed = asn1js.fromBER(toArrayBuffer(bytes));
+    return parsed.offset !== -1 && parsed.offset === bytes.byteLength;
+  } catch {
+    return false;
+  }
+}
+
+function wrapBytesInOctetString(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(new asn1js.OctetString({ valueHex: toArrayBuffer(bytes) }).toBER(false));
+}
+
 function createSafeFileBase(value: string): string {
   return value.toLowerCase().replace(/\.[a-z0-9]+$/i, '').replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
 }
@@ -1187,24 +1217,92 @@ function createValidationArtifacts(plan: NetworkValidationPlan, result: NetworkF
   return artifacts;
 }
 
+function assessValidationContent(plan: NetworkValidationPlan, result: { status: number; byteLength?: number; bytes?: Uint8Array }): { status: ValidationResultStatus; summary?: string; transcript: string[] } {
+  const ocspStatus = getValidationTargetLabel(plan) === 'OCSP' && isHttpSuccess(result.status) ? getOcspResponseStatus(result.bytes) : null;
+  return {
+    status: getValidationContentStatus(plan, result, ocspStatus),
+    summary: ocspStatus?.summary,
+    transcript: createValidationFollowUpTranscript(plan, result)
+  };
+}
+
+function createValidationResultSummary(plan: NetworkValidationPlan, result: { status: number }, byteLength: number, contentAssessment: { summary?: string }): string {
+  const contentSummary = contentAssessment.summary ? `; ${contentAssessment.summary}` : '';
+  return `${plan.operation} completed with HTTP status ${result.status}${contentSummary}; received ${byteLength} bytes from ${plan.url}.`;
+}
+
+function getValidationContentStatus(plan: NetworkValidationPlan, result: { status: number; bytes?: Uint8Array }, ocspStatus: { ok: boolean } | null = null): ValidationResultStatus {
+  if (!isHttpSuccess(result.status)) return 'NG';
+  if (getValidationTargetLabel(plan) !== 'OCSP') return 'OK';
+  return (ocspStatus ?? getOcspResponseStatus(result.bytes)).ok ? 'OK' : 'NG';
+}
+
 function createValidationFollowUpTranscript(plan: NetworkValidationPlan, result: { status: number; byteLength?: number; bytes?: Uint8Array }): string[] {
   const target = getValidationTargetLabel(plan);
-  if (result.status < 200 || result.status >= 400) return [createTranscriptLine(`Skipped ${target} content checks because HTTP status ${result.status} is not successful.`)];
+  if (!isHttpSuccess(result.status)) return [createTranscriptLine(`Skipped ${target} content checks because HTTP status ${result.status} is not successful.`)];
   if (!result.bytes || result.bytes.byteLength === 0) return [createTranscriptLine(`${target} response body bytes were not available to inspect.`)];
   if (target === 'CDP') return [
     createTranscriptLine('CRL bytes received. Queued DER/PEM decoding check.'),
     createTranscriptLine('CRL issuer, thisUpdate, nextUpdate, and revoked-certificate entries would be inspected here.'),
     createTranscriptLine('Certificate revocation matching is not performed silently beyond this explicit operation in the current prototype.')
   ];
-  if (target === 'OCSP') return [
-    createTranscriptLine('OCSP response bytes received. Queued responseStatus and BasicOCSPResponse decoding check.'),
-    createTranscriptLine('Certificate status, producedAt, thisUpdate, nextUpdate, and responder identity would be inspected here.')
-  ];
+  if (target === 'OCSP') return createOcspTranscript(result.bytes);
   if (target === 'AIA CA Issuers') return [
     createTranscriptLine('Issuer-certificate bytes received. Queued X.509 parsing check.'),
     createTranscriptLine('Issuer subject/authority key data would be compared against the loaded certificate in a full validation flow.')
   ];
   return [createTranscriptLine(`${target} response bytes received. Queued target-specific parsing checks.`)];
+}
+
+function createOcspTranscript(bytes: Uint8Array): string[] {
+  const responseStatus = getOcspResponseStatus(bytes);
+  return [
+    createTranscriptLine(responseStatus.message),
+    createTranscriptLine('BasicOCSPResponse signature, certificate status, producedAt, thisUpdate, nextUpdate, and responder identity are not validated yet.')
+  ];
+}
+
+function getOcspResponseStatus(bytes: Uint8Array | undefined): { ok: boolean; summary: string; message: string } {
+  if (!bytes || bytes.byteLength === 0) return { ok: false, summary: 'OCSP responseStatus unavailable', message: 'OCSP responseStatus could not be decoded because no response bytes were available.' };
+
+  try {
+    const parsed = asn1js.fromBER(toArrayBuffer(bytes));
+    if (parsed.offset === -1 || parsed.offset !== bytes.byteLength || !(parsed.result instanceof asn1js.Sequence)) {
+      return { ok: false, summary: 'OCSP responseStatus undecodable', message: 'OCSP responseStatus could not be decoded because the response is not a complete OCSPResponse sequence.' };
+    }
+
+    const values = parsed.result.valueBlock.value;
+    const statusNode = values[0];
+    if (!(statusNode instanceof asn1js.Enumerated)) {
+      return { ok: false, summary: 'OCSP responseStatus undecodable', message: 'OCSP responseStatus could not be decoded because the first OCSPResponse field is not ENUMERATED.' };
+    }
+
+    const status = statusNode.valueBlock.valueDec;
+    const statusName = getOcspResponseStatusName(status);
+    return {
+      ok: status === 0,
+      summary: `OCSP responseStatus ${statusName} (${status})`,
+      message: `OCSP responseStatus is ${statusName} (${status}).`
+    };
+  } catch (error) {
+    return { ok: false, summary: 'OCSP responseStatus undecodable', message: `OCSP responseStatus could not be decoded: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+function getOcspResponseStatusName(status: number): string {
+  const names: Record<number, string> = {
+    0: 'successful',
+    1: 'malformedRequest',
+    2: 'internalError',
+    3: 'tryLater',
+    5: 'sigRequired',
+    6: 'unauthorized'
+  };
+  return names[status] ?? 'unknown';
+}
+
+function isHttpSuccess(status: number): boolean {
+  return status >= 200 && status < 400;
 }
 
 function createTranscriptLine(message: string): string {

@@ -316,7 +316,7 @@ function createExtensionInput(extension: Extension): ExtensionInput {
 
 function createDemoExtensions(): ExtensionInput[] {
   const demoCrlUrl = createDemoDataUrl('application/pkix-crl', 'PKI Studio demo CRL');
-  const demoOcspUrl = createDemoDataUrl('application/ocsp-response', 'PKI Studio demo OCSP response');
+  const demoOcspUrl = createDataUrl('application/ocsp-response', new Uint8Array([0x30, 0x03, 0x0a, 0x01, 0x00]));
   const demoIssuerUrl = createDemoDataUrl('application/pkix-cert', 'PKI Studio demo issuer certificate');
 
   return [
@@ -348,7 +348,11 @@ function mockBytes(label: string): Uint8Array {
 }
 
 function createDemoDataUrl(mediaType: string, label: string): string {
-  return `data:${mediaType};base64,${bytesToBase64(mockBytes(label))}`;
+  return createDataUrl(mediaType, mockBytes(label));
+}
+
+function createDataUrl(mediaType: string, bytes: Uint8Array): string {
+  return `data:${mediaType};base64,${bytesToBase64(bytes)}`;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
