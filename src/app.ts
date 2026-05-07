@@ -237,14 +237,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   });
 
   clearValidationResultsButton.addEventListener('click', () => {
-    validationResults = [];
-    if (selectedValidationResultId) {
-      selectedValidationResultId = null;
-      showDetailContent();
-      renderEmptyDetail(detailContent);
-      closeDerViewer();
-    }
-    renderValidationResults();
+    clearValidationResults();
   });
 
   loadDemoButton.addEventListener('click', () => loadCertificate(CertGadgetsCore.createDemoCertificate(), 'Demo certificate loaded.'));
@@ -371,6 +364,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
       viewer?.close();
       logOperation(apiLogList, 'Certificate.close', `${previousDocument.sourceName} was closed before loading ${document.sourceName}.`);
     }
+    clearValidationResults({ resetDetail: false });
     certificateDocuments = [document];
     selectedNodeId = document.root.id;
     renderCertificateTree();
@@ -402,6 +396,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   function closeLoadedCertificates(): void {
     certificateDocuments = [];
     selectedNodeId = null;
+    clearValidationResults({ resetDetail: false });
     renderCertificateTree();
     showDetailContent();
     renderEmptyDetail(detailContent);
@@ -409,6 +404,18 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     setNotice('Closed loaded certificates.');
     logOperation(apiLogList, 'Certificate.close', 'Closed all loaded certificate documents.');
     updateActions();
+  }
+
+  function clearValidationResults(options: { resetDetail?: boolean } = {}): void {
+    const shouldResetDetail = options.resetDetail ?? true;
+    const hadSelectedValidationResult = Boolean(selectedValidationResultId);
+    validationResults = [];
+    selectedValidationResultId = null;
+    renderValidationResults();
+    if (!shouldResetDetail || !hadSelectedValidationResult) return;
+    showDetailContent();
+    renderEmptyDetail(detailContent);
+    closeDerViewer();
   }
 
   async function saveSelectedDerFile(): Promise<void> {
