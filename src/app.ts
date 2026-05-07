@@ -772,7 +772,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     }
 
     const url = new URL('index.html', window.location.href);
-    url.searchParams.set('certificate', key);
+    url.searchParams.set('data', key);
     const theme = document.documentElement.dataset.certgadgetsTheme;
     if (theme) url.searchParams.set('theme', theme);
     const certificateWindow = window.open(url.toString(), '_blank');
