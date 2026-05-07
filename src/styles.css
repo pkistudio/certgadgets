@@ -727,6 +727,7 @@ button:disabled {
 
 .detail-panel {
   display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -736,13 +737,43 @@ button:disabled {
 
 .detail-content,
 .pkistudio-viewer-mount {
-  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  height: 100%;
+}
+
+.detail-content {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.detail-panel.has-der-viewer .detail-content {
+  flex: 1 1 auto;
+}
+
+.detail-viewer-divider {
+  flex: 0 0 6px;
+  min-height: 6px;
+  border-top: 1px solid var(--panel-border);
+  border-bottom: 1px solid var(--panel-border);
+  background: linear-gradient(0deg, transparent 0 2px, var(--splitter) 2px 3px, transparent 3px 6px);
+  cursor: row-resize;
+}
+
+.detail-viewer-divider:hover,
+.detail-viewer-divider:focus-visible,
+.detail-panel.resizing-viewer .detail-viewer-divider {
+  border-color: var(--hover-border);
+  background-color: var(--hover-bg);
+  outline: none;
+}
+
+.pkistudio-viewer-mount {
+  flex: 0 0 var(--detail-viewer-height, clamp(260px, 58%, 620px));
+  overflow: hidden;
 }
 
 .detail-content[hidden],
+.detail-viewer-divider[hidden],
 .pkistudio-viewer-mount[hidden] {
   display: none;
 }
@@ -834,8 +865,8 @@ button:disabled {
 .policy-box,
 .network-action,
 .network-target,
-.validation-transcript,
-.hex-preview {
+.validation-artifacts,
+.validation-transcript {
   border: 1px solid var(--subtle-border);
   border-radius: 3px;
   padding: 10px;
@@ -875,6 +906,12 @@ button:disabled {
   gap: 8px;
 }
 
+.validation-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .validation-transcript h2 {
   margin: 0;
   font-size: 13px;
@@ -892,15 +929,8 @@ button:disabled {
 }
 
 .network-target code,
-.hex-preview,
 .asn-tree {
   font-family: Consolas, "Courier New", monospace;
-}
-
-.hex-preview {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .viewer-menu {

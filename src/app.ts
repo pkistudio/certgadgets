@@ -34,13 +34,33 @@ type ValidationResultEntry = {
   target: string;
   detail: string;
   transcript: string;
+  artifacts: ValidationDataArtifact[];
 };
+
+type ValidationDataArtifact = {
+  id: string;
+  label: string;
+  direction: 'sent' | 'received';
+  bytes: Uint8Array;
+  mediaType?: string;
+};
+
+type NetworkFetchResult = {
+  status: number;
+  byteLength?: number;
+  bytes?: Uint8Array;
+  mediaType?: string;
+  sentBytes?: Uint8Array;
+  sentMediaType?: string;
+};
+
+type ViewerRoot = DocumentFragment | Element;
 
 export type AppTheme = 'light' | 'dark';
 
 export type CertificateGadgetsHost = {
   confirmNetworkAccess?: (request: NetworkValidationPlan) => boolean | Promise<boolean>;
-  fetchNetworkResource?: (request: NetworkValidationPlan) => Promise<{ status: number; byteLength: number }>;
+  fetchNetworkResource?: (request: NetworkValidationPlan) => Promise<NetworkFetchResult>;
 };
 
 export type InitCertificateGadgetsOptions = {
@@ -105,6 +125,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
         <div id="paneResizer" class="pane-resizer" role="separator" aria-label="Resize panes" aria-orientation="vertical" tabindex="0"></div>
         <section id="detailPane" class="detail-panel" aria-label="Selected certificate item">
           <div id="detailContent" class="detail-content"></div>
+          <div id="detailViewerDivider" class="detail-viewer-divider" role="separator" aria-label="Resize ASN.1 viewer" aria-orientation="horizontal" tabindex="0" hidden></div>
           <div id="viewerMount" class="pkistudio-viewer-mount" hidden></div>
         </section>
       </section>
@@ -168,7 +189,9 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   const validationPanel = query<HTMLElement>(app, '.validation-panel');
   const validationResultsBody = query<HTMLTableSectionElement>(app, '#validationResultsBody');
   const clearValidationResultsButton = query<HTMLButtonElement>(app, '#clearValidationResultsButton');
+  const detailPane = query<HTMLElement>(app, '#detailPane');
   const detailContent = query<HTMLElement>(app, '#detailContent');
+  const detailViewerDivider = query<HTMLElement>(app, '#detailViewerDivider');
   const viewerMount = query<HTMLElement>(app, '#viewerMount');
   const formNotice = query<HTMLElement>(app, '#formNotice');
   const workspace = query<HTMLElement>(app, '.workspace');
@@ -186,6 +209,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
   applyRequestedTheme(options.theme);
   setupPaneResizer(workspace, paneResizer);
+  setupDetailViewerResizer(detailPane, detailViewerDivider, viewerMount);
   setupValidationResizer(app, workspace, validationPanel, validationResizer, apiLogResizer, apiLogPanel);
   setupApiLogResizer(app, workspace, apiLogPanel, apiLogList, apiLogResizer);
   bootViewer();
@@ -213,6 +237,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
       selectedValidationResultId = null;
       showDetailContent();
       renderEmptyDetail(detailContent);
+      closeDerViewer();
     }
     renderValidationResults();
   });
@@ -274,8 +299,15 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   });
 
   detailContent.addEventListener('click', async (event) => {
-    const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-action="run-network-validation"]') : null;
+    const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-action]') : null;
     if (!button) return;
+
+    if (button.dataset.action === 'open-validation-artifact') {
+      openValidationArtifact(button.dataset.validationResultId ?? '', button.dataset.artifactId ?? '');
+      return;
+    }
+
+    if (button.dataset.action !== 'run-network-validation') return;
     const node = selectedNodeId ? findNode(selectedNodeId) : null;
     if (!node?.networkUrl) return;
     await runNetworkValidationPlan(createNetworkValidationPlan(node));
@@ -291,8 +323,10 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
   function bootViewer(): void {
     try {
-      viewer = PkiStudio.init({ mount: viewerMount, oidUrl: PKISTUDIO_OIDS_URL });
+      viewer = PkiStudio.init({ mount: viewerMount, oidUrl: PKISTUDIO_OIDS_URL, newWindowUrl: 'viewer.html' });
       applyEmbeddedViewerStyles(viewer);
+      applyReadonlyViewerState(viewer);
+      listenForReadonlyViewerActions(viewer);
       logOperation(apiLogList, 'pkistudiojs.init', `Viewer ${PkiStudio.version ?? '(unknown version)'} mounted.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -364,9 +398,9 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     certificateDocuments = [];
     selectedNodeId = null;
     renderCertificateTree();
-    viewer?.close();
     showDetailContent();
     renderEmptyDetail(detailContent);
+    closeDerViewer();
     setNotice('Closed loaded certificates.');
     logOperation(apiLogList, 'Certificate.close', 'Closed all loaded certificate documents.');
     updateActions();
@@ -424,12 +458,13 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
       transcript.push(createTranscriptLine('Network access approved. Sending request.'));
       const result = await fetchNetworkResource(plan);
       const status: ValidationResultStatus = result.status >= 200 && result.status < 400 ? 'OK' : 'NG';
+      const byteLength = getNetworkResultByteLength(result);
       transcript.push(createTranscriptLine(`Received HTTP status ${result.status}.`));
-      transcript.push(createTranscriptLine(`Received ${result.byteLength} bytes.`));
+      transcript.push(createTranscriptLine(`Received ${byteLength} bytes.`));
       transcript.push(...createValidationFollowUpTranscript(plan, result));
-      updateValidationResult(resultId, status, `${plan.operation} completed with HTTP status ${result.status}; received ${result.byteLength} bytes from ${plan.url}.`, transcript.join('\n'));
+      updateValidationResult(resultId, status, `${plan.operation} completed with HTTP status ${result.status}; received ${byteLength} bytes from ${plan.url}.`, transcript.join('\n'), createValidationArtifacts(plan, result));
       setNotice(`${target} validation finished with ${status}.`, status === 'NG');
-      logOperation(apiLogList, plan.operation, `${plan.url} -> status ${result.status}, ${result.byteLength} bytes.`, status === 'NG' ? 'error' : 'ok');
+      logOperation(apiLogList, plan.operation, `${plan.url} -> status ${result.status}, ${byteLength} bytes.`, status === 'NG' ? 'error' : 'ok');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       transcript.push(createTranscriptLine(`Request failed: ${message}`));
@@ -444,10 +479,41 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     return window.confirm(`Allow network access for ${plan.reason}?\n\n${plan.url}`);
   }
 
-  async function fetchNetworkResource(plan: NetworkValidationPlan): Promise<{ status: number; byteLength: number }> {
+  async function fetchNetworkResource(plan: NetworkValidationPlan): Promise<NetworkFetchResult> {
     if (options.host?.fetchNetworkResource) return options.host.fetchNetworkResource(plan);
-    await new Promise((resolve) => window.setTimeout(resolve, 450));
-    return { status: 200, byteLength: plan.url.length * 37 };
+    try {
+      return await fetchNetworkResourceDirect(plan, plan.url);
+    } catch (error) {
+      const proxyUrl = getDevFetchProxyUrl(plan.url);
+      if (!proxyUrl) throw error;
+      return fetchNetworkResourceDirect(plan, proxyUrl, true);
+    }
+  }
+
+  async function fetchNetworkResourceDirect(plan: NetworkValidationPlan, url: string, useDevProxy = false): Promise<NetworkFetchResult> {
+    const headers = new Headers();
+    const method = plan.method ?? (plan.requestBytes ? 'POST' : 'GET');
+    if (useDevProxy) {
+      headers.set('X-CertGadgets-Target-Method', method);
+      if (plan.requestMediaType) headers.set('X-CertGadgets-Target-Content-Type', plan.requestMediaType);
+    } else if (plan.requestBytes && plan.requestMediaType) {
+      headers.set('Content-Type', plan.requestMediaType);
+    }
+    const response = await fetch(url, {
+      method: useDevProxy && plan.requestBytes ? 'POST' : method,
+      headers,
+      body: plan.requestBytes ? toArrayBuffer(plan.requestBytes) : undefined
+    });
+    if (useDevProxy && response.headers.get('X-CertGadgets-Proxied') !== '1') throw new Error(await response.text());
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return {
+      status: response.status,
+      byteLength: bytes.byteLength,
+      bytes,
+      mediaType: response.headers.get('Content-Type') ?? undefined,
+      sentBytes: plan.requestBytes,
+      sentMediaType: plan.requestMediaType
+    };
   }
 
   function renderCertificateTree(): void {
@@ -461,17 +527,17 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     certificateTree.innerHTML = certificateDocuments.map((document) => renderTreeNode(document.root, 0, selectedNodeId)).join('');
   }
 
-  function addValidationResult(status: ValidationResultStatus, target: string, detail: string, transcript: string): string {
+  function addValidationResult(status: ValidationResultStatus, target: string, detail: string, transcript: string, artifacts: ValidationDataArtifact[] = []): string {
     const id = crypto.randomUUID?.() ?? `validation-${Date.now()}-${validationResults.length}`;
-    validationResults = [...validationResults, { id, timestamp: new Date(), status, target, detail, transcript }];
+    validationResults = [...validationResults, { id, timestamp: new Date(), status, target, detail, transcript, artifacts }];
     while (validationResults.length > MAX_VALIDATION_RESULTS) validationResults.shift();
     if (selectedValidationResultId && !validationResults.some((entry) => entry.id === selectedValidationResultId)) selectedValidationResultId = null;
     renderValidationResults();
     return id;
   }
 
-  function updateValidationResult(id: string, status: ValidationResultStatus, detail: string, transcript: string): void {
-    validationResults = validationResults.map((entry) => entry.id === id ? { ...entry, timestamp: new Date(), status, detail, transcript } : entry);
+  function updateValidationResult(id: string, status: ValidationResultStatus, detail: string, transcript: string, artifacts?: ValidationDataArtifact[]): void {
+    validationResults = validationResults.map((entry) => entry.id === id ? { ...entry, timestamp: new Date(), status, detail, transcript, artifacts: artifacts ?? entry.artifacts } : entry);
     renderValidationResults();
     if (selectedValidationResultId === id) renderSelectedValidationResult();
   }
@@ -506,6 +572,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     renderCertificateTree();
     renderValidationResults();
     showDetailContent();
+    closeDerViewer();
     renderValidationResultDetail(detailContent, result);
     updateActions();
   }
@@ -514,6 +581,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     const result = selectedValidationResultId ? validationResults.find((entry) => entry.id === selectedValidationResultId) : null;
     if (!result) return;
     showDetailContent();
+    closeDerViewer();
     renderValidationResultDetail(detailContent, result);
   }
 
@@ -522,24 +590,20 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     if (!node) {
       showDetailContent();
       renderEmptyDetail(detailContent);
-      return;
-    }
-
-    if (node.view === 'der') {
-      showDerViewer(node);
+      closeDerViewer();
       return;
     }
 
     showDetailContent();
-    if (node.view === 'summary') renderSummaryDetail(detailContent, node);
+    if (node.view === 'summary' || node.view === 'der') renderSummaryDetail(detailContent, node);
     else if (node.view === 'extension') renderExtensionDetail(detailContent, node);
-    else if (node.view === 'validation') renderValidationDetail(detailContent, node);
     else if (node.view === 'network') renderNetworkDetail(detailContent, node);
     else if (node.derBytes) {
-      showDerViewer(node);
+      renderSummaryDetail(detailContent, node);
     } else {
       renderSummaryDetail(detailContent, node);
     }
+    showDerViewer(node);
   }
 
   function updateActions(): void {
@@ -551,19 +615,32 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   function showDerViewer(node: CertificateTreeNode): void {
     const bytes = node.derBytes;
     if (!bytes || !viewer) {
-      showDetailContent();
-      renderSummaryDetail(detailContent, node);
+      closeDerViewer();
       return;
     }
-    detailContent.hidden = true;
     viewerMount.hidden = false;
-    viewer.loadBytes(bytes, `${node.label} (${bytes.byteLength} bytes)`);
-    logOperation(apiLogList, 'pkistudiojs.loadBytes', `${node.label} (${bytes.byteLength} bytes).`);
+    detailViewerDivider.hidden = false;
+    detailPane.classList.add('has-der-viewer');
+    restoreDetailViewerHeight(detailPane, detailViewerDivider, viewerMount);
+    try {
+      viewer.loadBytes(bytes, `${node.label} (${bytes.byteLength} bytes)`);
+      applyReadonlyViewerState(viewer);
+      logOperation(apiLogList, 'pkistudiojs.loadBytes', `${node.label} (${bytes.byteLength} bytes).`);
+    } catch (error) {
+      closeDerViewer();
+      logOperation(apiLogList, 'pkistudiojs.loadBytes', `${node.label}: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
   }
 
   function showDetailContent(): void {
-    viewerMount.hidden = true;
     detailContent.hidden = false;
+  }
+
+  function closeDerViewer(): void {
+    viewerMount.hidden = true;
+    detailViewerDivider.hidden = true;
+    detailPane.classList.remove('has-der-viewer');
+    viewer?.close();
   }
 
   function getSelectedCertificate(): CertificateDocument | null {
@@ -583,6 +660,38 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   function setNotice(message: string, isError = false): void {
     formNotice.textContent = message;
     formNotice.classList.toggle('error', isError);
+  }
+
+  function openValidationArtifact(resultId: string, artifactId: string): void {
+    const result = validationResults.find((entry) => entry.id === resultId);
+    const artifact = result?.artifacts.find((item) => item.id === artifactId);
+    if (!result || !artifact) return;
+
+    const key = `certgadgets-validation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const payload = {
+      label: `${artifact.direction} ${artifact.label}`,
+      bytes: bytesToBase64(artifact.bytes)
+    };
+
+    try {
+      localStorage.setItem(key, JSON.stringify(payload));
+    } catch (error) {
+      logOperation(apiLogList, 'Validation.openViewer', error instanceof Error ? error.message : String(error), 'error');
+      return;
+    }
+
+    const url = new URL('viewer.html', window.location.href);
+    url.searchParams.set('subtree', key);
+    const theme = document.documentElement.dataset.certgadgetsTheme;
+    if (theme) url.searchParams.set('theme', theme);
+    const artifactWindow = window.open(url.toString(), '_blank');
+    if (!artifactWindow) {
+      localStorage.removeItem(key);
+      logOperation(apiLogList, 'Validation.openViewer', `${artifact.label} could not be opened because the popup was blocked.`, 'error');
+      return;
+    }
+    artifactWindow.opener = null;
+    logOperation(apiLogList, 'Validation.openViewer', `${artifact.label} opened in ASN.1 viewer.`);
   }
 
   return {
@@ -673,20 +782,6 @@ function renderExtensionDetail(detailPane: HTMLElement, node: CertificateTreeNod
         <h1>${escapeHtml(node.label)}</h1>
       </header>
       ${renderDetailList(node)}
-      ${renderDerPreview(node)}
-    </section>
-  `;
-}
-
-function renderValidationDetail(detailPane: HTMLElement, node: CertificateTreeNode): void {
-  detailPane.innerHTML = `
-    <section class="detail-surface" data-certgadgets-selected-node="${escapeHtml(node.id)}">
-      <header class="detail-header">
-        <p class="detail-kicker">validation policy</p>
-        <h1>${escapeHtml(node.label)}</h1>
-      </header>
-      ${renderDetailList(node)}
-      <div class="policy-box">Network-assisted validation is explicit. Selecting or loading a certificate never performs silent CRL, OCSP, AIA, or issuer-certificate access.</div>
     </section>
   `;
 }
@@ -727,17 +822,29 @@ function renderValidationResultDetail(detailPane: HTMLElement, result: Validatio
         <div><dt>Target</dt><dd>${escapeHtml(result.target)}</dd></div>
         <div><dt>Summary</dt><dd>${escapeHtml(result.detail)}</dd></div>
       </dl>
-      <div class="policy-box">This view shows the hidden Validation detail field recorded for the selected result row. It includes the explicit network approval step, the request outcome, and target-specific follow-up checks.</div>
+      ${renderValidationArtifacts(result)}
       <section class="validation-transcript">
-        <h2>Detail Log</h2>
         <pre>${escapeHtml(result.transcript)}</pre>
       </section>
     </section>
   `;
 }
 
+function renderValidationArtifacts(result: ValidationResultEntry): string {
+  if (result.artifacts.length === 0) return '';
+  return `
+    <section class="validation-artifacts">
+      ${result.artifacts.map((artifact) => `
+        <button type="button" data-action="open-validation-artifact" data-validation-result-id="${escapeHtml(result.id)}" data-artifact-id="${escapeHtml(artifact.id)}">
+          Open ${escapeHtml(artifact.direction)} ${escapeHtml(artifact.label)} (${artifact.bytes.byteLength} bytes)
+        </button>
+      `).join('')}
+    </section>
+  `;
+}
+
 function renderDetailList(node: CertificateTreeNode): string {
-  const details = node.details ?? [];
+  const details = getDisplayDetails(node);
   if (details.length === 0) return '<p class="detail-note">No structured details are available yet.</p>';
   return `
     <dl class="detail-list">
@@ -746,9 +853,72 @@ function renderDetailList(node: CertificateTreeNode): string {
   `;
 }
 
-function renderDerPreview(node: CertificateTreeNode): string {
-  if (!node.derBytes) return '';
-  return `<pre class="hex-preview">${escapeHtml(CertGadgetsCore.bytesToHexPreview(node.derBytes))}</pre>`;
+function getDisplayDetails(node: CertificateTreeNode): Array<{ label: string; value: string }> {
+  return (node.details ?? []).flatMap((detail) => {
+    if (detail.label === 'Issuer' || detail.label === 'Subject') {
+      return [{ ...detail, value: reverseDistinguishedName(detail.value) }];
+    }
+
+    if (detail.label === 'Validity') {
+      const validity = parseValidityRange(detail.value);
+      if (!validity) return [detail];
+      return [
+        { label: 'Validity', value: `from ${validity.from} ～ to ${validity.to}` },
+        { label: 'Validity days', value: `${validity.days} days` }
+      ];
+    }
+
+    return [detail];
+  });
+}
+
+function reverseDistinguishedName(value: string): string {
+  return splitDistinguishedName(value).reverse().join(', ');
+}
+
+function splitDistinguishedName(value: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let escaped = false;
+
+  for (const character of value) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+
+    if (character === '\\') {
+      current += character;
+      escaped = true;
+      continue;
+    }
+
+    if (character === ',') {
+      const trimmed = current.trim();
+      if (trimmed) parts.push(trimmed);
+      current = '';
+      continue;
+    }
+
+    current += character;
+  }
+
+  const trimmed = current.trim();
+  if (trimmed) parts.push(trimmed);
+  return parts.length > 0 ? parts : [value];
+}
+
+function parseValidityRange(value: string): { from: string; to: string; days: number } | null {
+  const match = /^(.+?)\s+to\s+(.+)$/.exec(value.trim());
+  if (!match) return null;
+  const from = match[1].trim();
+  const to = match[2].trim();
+  const fromTime = Date.parse(from);
+  const toTime = Date.parse(to);
+  if (!Number.isFinite(fromTime) || !Number.isFinite(toTime)) return { from, to, days: 0 };
+  const days = Math.max(0, Math.round((toTime - fromTime) / 86_400_000));
+  return { from, to, days };
 }
 
 function toggleTopMenu(openMenu: HTMLElement, openButton: HTMLButtonElement, otherMenu: HTMLElement, otherButton: HTMLButtonElement): void {
@@ -828,6 +998,14 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer;
 }
 
+function getDevFetchProxyUrl(targetUrl: string): string | null {
+  if (!/^https?:\/\//i.test(targetUrl)) return null;
+  if (!/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(window.location.hostname)) return null;
+  const proxyUrl = new URL('/__certgadgets_fetch', window.location.href);
+  proxyUrl.searchParams.set('url', targetUrl);
+  return proxyUrl.toString();
+}
+
 function applyEmbeddedViewerStyles(instance: PkiStudioViewerInstance): void {
   if (!instance.root) return;
   const style = document.createElement('style');
@@ -863,9 +1041,82 @@ function applyEmbeddedViewerStyles(instance: PkiStudioViewerInstance): void {
       min-height: 0 !important;
       max-height: none !important;
     }
+
+    :host(.certgadgets-viewer-readonly) [data-action="toggle-load-menu"],
+    :host(.certgadgets-viewer-readonly) [data-action="open"],
+    :host(.certgadgets-viewer-readonly) [data-action="load-clipboard-pem"],
+    :host(.certgadgets-viewer-readonly) [data-action="load-clipboard-hex"],
+    :host(.certgadgets-viewer-readonly) [data-action="close"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="edit"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="insert-before"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="insert-before-new-item"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="insert-before-clipboard-hex"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="add-child"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="add-child-new-item"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="add-child-clipboard-hex"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="delete"],
+    .certgadgets-viewer-readonly [data-action="toggle-load-menu"],
+    .certgadgets-viewer-readonly [data-action="open"],
+    .certgadgets-viewer-readonly [data-action="load-clipboard-pem"],
+    .certgadgets-viewer-readonly [data-action="load-clipboard-hex"],
+    .certgadgets-viewer-readonly [data-action="close"],
+    .certgadgets-viewer-readonly [data-node-action="edit"],
+    .certgadgets-viewer-readonly [data-node-action="insert-before"],
+    .certgadgets-viewer-readonly [data-node-action="insert-before-new-item"],
+    .certgadgets-viewer-readonly [data-node-action="insert-before-clipboard-hex"],
+    .certgadgets-viewer-readonly [data-node-action="add-child"],
+    .certgadgets-viewer-readonly [data-node-action="add-child-new-item"],
+    .certgadgets-viewer-readonly [data-node-action="add-child-clipboard-hex"],
+    .certgadgets-viewer-readonly [data-node-action="delete"] {
+      opacity: 0.45;
+      pointer-events: none;
+    }
   `;
   if (instance.root instanceof ShadowRoot) instance.root.prepend(style);
   else instance.root.prepend(style);
+}
+
+function listenForReadonlyViewerActions(instance: PkiStudioViewerInstance): void {
+  if (!instance.root) return;
+  instance.root.addEventListener('click', guardReadonlyViewerAction, true);
+}
+
+function guardReadonlyViewerAction(event: Event): void {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest<HTMLButtonElement>('button[data-action], button[data-node-action]');
+  if (!button || !isReadonlyViewerAction(button)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+function applyReadonlyViewerState(instance: PkiStudioViewerInstance): void {
+  if (!instance.root) return;
+  getViewerStateElement(instance.root)?.classList.add('certgadgets-viewer-readonly');
+  for (const button of instance.root.querySelectorAll<HTMLButtonElement>('button[data-action], button[data-node-action]')) {
+    if (!isReadonlyViewerAction(button)) continue;
+    button.disabled = true;
+    button.title = 'The embedded ASN.1 viewer is read-only in Certificate Gadgets.';
+  }
+}
+
+function getViewerStateElement(root: ViewerRoot): HTMLElement | null {
+  if (root instanceof ShadowRoot) return root.host instanceof HTMLElement ? root.host : null;
+  return root instanceof HTMLElement ? root : null;
+}
+
+function isReadonlyViewerAction(button: HTMLButtonElement): boolean {
+  const action = button.dataset.action;
+  if (action === 'toggle-load-menu' || action === 'open' || action === 'load-clipboard-pem' || action === 'load-clipboard-hex' || action === 'close') return true;
+
+  const nodeAction = button.dataset.nodeAction;
+  return nodeAction === 'edit' ||
+    nodeAction === 'delete' ||
+    nodeAction === 'add-child' ||
+    nodeAction === 'add-child-new-item' ||
+    nodeAction === 'add-child-clipboard-hex' ||
+    nodeAction === 'insert-before' ||
+    nodeAction === 'insert-before-new-item' ||
+    nodeAction === 'insert-before-clipboard-hex';
 }
 
 function findNodeInTree(node: CertificateTreeNode, nodeId: string): CertificateTreeNode | null {
@@ -904,9 +1155,42 @@ function getNetworkValidationDescription(plan: NetworkValidationPlan): string {
   return 'Run this explicit network-assisted validation request and record the result in the Validation pane and operation log.';
 }
 
-function createValidationFollowUpTranscript(plan: NetworkValidationPlan, result: { status: number; byteLength: number }): string[] {
+function getNetworkResultByteLength(result: { byteLength?: number; bytes?: Uint8Array }): number {
+  return result.bytes?.byteLength ?? result.byteLength ?? 0;
+}
+
+function createValidationArtifacts(plan: NetworkValidationPlan, result: NetworkFetchResult): ValidationDataArtifact[] {
+  const artifacts: ValidationDataArtifact[] = [];
+  const sentBytes = result.sentBytes ?? plan.requestBytes;
+  const sentMediaType = result.sentMediaType ?? plan.requestMediaType;
+
+  if (sentBytes && sentBytes.byteLength > 0) {
+    artifacts.push({
+      id: 'sent-1',
+      label: `${getValidationTargetLabel(plan)} request`,
+      direction: 'sent',
+      bytes: sentBytes,
+      mediaType: sentMediaType
+    });
+  }
+
+  if (result.bytes && result.bytes.byteLength > 0) {
+    artifacts.push({
+      id: 'received-1',
+      label: `${getValidationTargetLabel(plan)} response`,
+      direction: 'received',
+      bytes: result.bytes,
+      mediaType: result.mediaType
+    });
+  }
+
+  return artifacts;
+}
+
+function createValidationFollowUpTranscript(plan: NetworkValidationPlan, result: { status: number; byteLength?: number; bytes?: Uint8Array }): string[] {
   const target = getValidationTargetLabel(plan);
   if (result.status < 200 || result.status >= 400) return [createTranscriptLine(`Skipped ${target} content checks because HTTP status ${result.status} is not successful.`)];
+  if (!result.bytes || result.bytes.byteLength === 0) return [createTranscriptLine(`${target} response body bytes were not available to inspect.`)];
   if (target === 'CDP') return [
     createTranscriptLine('CRL bytes received. Queued DER/PEM decoding check.'),
     createTranscriptLine('CRL issuer, thisUpdate, nextUpdate, and revoked-certificate entries would be inspected here.'),
@@ -973,6 +1257,76 @@ function setupPaneResizer(workspace: HTMLElement, paneResizer: HTMLElement): voi
 
   paneResizer.addEventListener('pointerup', (event) => finishPaneResize(workspace, paneResizer, event));
   paneResizer.addEventListener('pointercancel', (event) => finishPaneResize(workspace, paneResizer, event));
+}
+
+function setupDetailViewerResizer(detailPane: HTMLElement, divider: HTMLElement, viewerMount: HTMLElement): void {
+  let startY = 0;
+  let startHeight = 0;
+
+  divider.addEventListener('pointerdown', (event) => {
+    if (viewerMount.hidden) return;
+    event.preventDefault();
+    startY = event.clientY;
+    startHeight = viewerMount.getBoundingClientRect().height;
+    divider.setPointerCapture(event.pointerId);
+    detailPane.classList.add('resizing-viewer');
+  });
+
+  divider.addEventListener('pointermove', (event) => {
+    if (!divider.hasPointerCapture(event.pointerId)) return;
+    setDetailViewerHeight(detailPane, divider, viewerMount, startHeight + startY - event.clientY);
+  });
+
+  divider.addEventListener('pointerup', (event) => finishDetailViewerResize(detailPane, divider, event));
+  divider.addEventListener('pointercancel', (event) => finishDetailViewerResize(detailPane, divider, event));
+
+  divider.addEventListener('keydown', (event) => {
+    if (viewerMount.hidden) return;
+    const currentHeight = viewerMount.getBoundingClientRect().height;
+    const step = event.shiftKey ? 40 : 16;
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setDetailViewerHeight(detailPane, divider, viewerMount, currentHeight + step);
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setDetailViewerHeight(detailPane, divider, viewerMount, currentHeight - step);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      setDetailViewerHeight(detailPane, divider, viewerMount, getDetailViewerHeightBounds(detailPane, divider).min);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      setDetailViewerHeight(detailPane, divider, viewerMount, getDetailViewerHeightBounds(detailPane, divider).max);
+    }
+  });
+}
+
+function restoreDetailViewerHeight(detailPane: HTMLElement, divider: HTMLElement, viewerMount: HTMLElement): void {
+  const storedHeight = Number.parseInt(localStorage.getItem('certgadgets.detailViewerHeight') ?? '', 10);
+  const currentHeight = viewerMount.getBoundingClientRect().height;
+  setDetailViewerHeight(detailPane, divider, viewerMount, Number.isFinite(storedHeight) ? storedHeight : currentHeight || 360, false);
+}
+
+function setDetailViewerHeight(detailPane: HTMLElement, divider: HTMLElement, viewerMount: HTMLElement, height: number, persist = true): void {
+  const bounds = getDetailViewerHeightBounds(detailPane, divider);
+  const clampedHeight = Math.round(Math.min(Math.max(height, bounds.min), bounds.max));
+  viewerMount.style.setProperty('--detail-viewer-height', `${clampedHeight}px`);
+  divider.setAttribute('aria-valuemin', String(bounds.min));
+  divider.setAttribute('aria-valuemax', String(bounds.max));
+  divider.setAttribute('aria-valuenow', String(clampedHeight));
+  if (persist) localStorage.setItem('certgadgets.detailViewerHeight', String(clampedHeight));
+}
+
+function getDetailViewerHeightBounds(detailPane: HTMLElement, divider: HTMLElement): { min: number; max: number } {
+  const dividerHeight = divider.getBoundingClientRect().height || 6;
+  const paneHeight = detailPane.getBoundingClientRect().height;
+  const min = 180;
+  const minDetailHeight = 120;
+  return { min, max: Math.max(min, paneHeight - dividerHeight - minDetailHeight) };
+}
+
+function finishDetailViewerResize(detailPane: HTMLElement, divider: HTMLElement, event: PointerEvent): void {
+  if (divider.hasPointerCapture(event.pointerId)) divider.releasePointerCapture(event.pointerId);
+  detailPane.classList.remove('resizing-viewer');
 }
 
 function setupApiLogResizer(app: HTMLElement, workspace: HTMLElement, apiLogPanel: HTMLElement, apiLogList: HTMLElement, apiLogResizer: HTMLElement): void {

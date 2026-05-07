@@ -16,10 +16,9 @@ export type CertificateNodeKind =
   | 'extension'
   | 'signature'
   | 'signature-value'
-  | 'validation'
   | 'network-resource';
 
-export type CertificateNodeView = 'summary' | 'extension' | 'validation' | 'network' | 'der';
+export type CertificateNodeView = 'summary' | 'extension' | 'network' | 'der';
 
 export type CertificateDetail = {
   label: string;
@@ -51,6 +50,9 @@ export type NetworkValidationPlan = {
   operation: string;
   reason: string;
   url: string;
+  method?: string;
+  requestBytes?: Uint8Array;
+  requestMediaType?: string;
 };
 
 export type CertGadgetsCoreApi = {
@@ -63,14 +65,7 @@ export type CertGadgetsCoreApi = {
 
 const APP_VERSION = '0.0.0';
 
-const DEMO_CERTIFICATE_DER = new Uint8Array([
-  0x30, 0x82, 0x03, 0x21, 0x30, 0x82, 0x02, 0x09, 0xa0, 0x03, 0x02, 0x01,
-  0x02, 0x02, 0x10, 0x42, 0x15, 0x66, 0x90, 0x90, 0x21, 0x30, 0x0d, 0x06,
-  0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05, 0x00,
-  0x30, 0x33, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13,
-  0x02, 0x4a, 0x50, 0x31, 0x12, 0x30, 0x10, 0x06, 0x03, 0x55, 0x04, 0x0a,
-  0x0c, 0x09, 0x50, 0x4b, 0x49, 0x20, 0x53, 0x74, 0x75, 0x64, 0x69, 0x6f
-]);
+const DEMO_CERTIFICATE_DER = mockBytes('www.example.test certificate');
 
 export const CertGadgetsCore: CertGadgetsCoreApi = {
   version: APP_VERSION,
@@ -193,7 +188,6 @@ function buildCertificateDocument(input: {
 }): CertificateDocument {
   const rootId = `${input.id}:certificate`;
   const extensionInputs = input.extensions ?? createDemoExtensions();
-  const networkResources = extensionInputs.flatMap((extension) => extension.networkUrls.map((url) => ({ label: extension.label, url })));
   const root: CertificateTreeNode = {
     id: rootId,
     kind: 'certificate',
@@ -236,33 +230,7 @@ function buildCertificateDocument(input: {
         children: extensionInputs.map((extension) => createExtension(rootId, extension))
       },
       createLeaf(rootId, 'signature', 'Certificate Signature Algorithm', input.certificateSignatureAlgorithm, input.certificateSignatureAlgorithmDer ?? mockBytes('certificate-signature-algorithm')),
-      createLeaf(rootId, 'signature-value', 'Certificate Signature Value', input.certificateSignature, input.certificateSignatureDer ?? mockBytes('certificate-signature-value')),
-      {
-        id: `${rootId}:validation`,
-        kind: 'validation',
-        label: 'Validation',
-        note: 'offline first',
-        view: 'validation',
-        details: [
-          { label: 'Local checks', value: 'Structure, validity fields, extensions, and signature metadata' },
-          { label: 'Network checks', value: 'CRL, OCSP, AIA, and issuer fetching are explicit operations' },
-          { label: 'Policy', value: 'No silent network access while loading or selecting a certificate' }
-        ],
-        children: [
-          ...networkResources.map((resource, index) => ({
-            id: `${rootId}:validation:network-${index}`,
-            kind: 'network-resource' as const,
-            label: getNetworkResourceLabel(resource.label, resource.url),
-            note: 'explicit',
-            view: 'network' as const,
-            networkUrl: resource.url,
-            details: [
-              { label: 'Source', value: resource.label },
-              { label: 'Target', value: resource.url }
-            ]
-          }))
-        ]
-      }
+      createLeaf(rootId, 'signature-value', 'Certificate Signature Value', input.certificateSignature, input.certificateSignatureDer ?? mockBytes('certificate-signature-value'))
     ]
   };
 
@@ -347,14 +315,18 @@ function createExtensionInput(extension: Extension): ExtensionInput {
 }
 
 function createDemoExtensions(): ExtensionInput[] {
+  const demoCrlUrl = createDemoDataUrl('application/pkix-crl', 'PKI Studio demo CRL');
+  const demoOcspUrl = createDemoDataUrl('application/ocsp-response', 'PKI Studio demo OCSP response');
+  const demoIssuerUrl = createDemoDataUrl('application/pkix-cert', 'PKI Studio demo issuer certificate');
+
   return [
     createDemoExtension('basic-constraints', 'Basic Constraints', 'CA: false'),
     createDemoExtension('key-usage', 'Key Usage', 'Digital Signature, Key Encipherment'),
     createDemoExtension('san', 'Subject Alternative Name', 'DNS:www.example.test'),
-    createDemoExtension('crl-dp', 'CRL Distribution Points', 'http://crl.example.test/demo-ca.crl', ['http://crl.example.test/demo-ca.crl']),
-    createDemoExtension('aia', 'Authority Information Access', 'OCSP: http://ocsp.example.test, CA Issuers: http://ca.example.test/demo-ca.cer', [
-      'http://ocsp.example.test',
-      'http://ca.example.test/demo-ca.cer'
+    createDemoExtension('crl-dp', 'CRL Distribution Points', 'demo CRL fixture', [demoCrlUrl]),
+    createDemoExtension('aia', 'Authority Information Access', 'OCSP demo fixture, CA Issuers demo fixture', [
+      demoOcspUrl,
+      demoIssuerUrl
     ])
   ];
 }
@@ -373,6 +345,16 @@ function createDemoExtension(id: string, label: string, summary: string, network
 function mockBytes(label: string): Uint8Array {
   const bytes = new TextEncoder().encode(label);
   return new Uint8Array([0x30, bytes.length + 2, 0x04, bytes.length, ...bytes]);
+}
+
+function createDemoDataUrl(mediaType: string, label: string): string {
+  return `data:${mediaType};base64,${bytesToBase64(mockBytes(label))}`;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 function normalizeCertificateBytes(bytes: Uint8Array): Uint8Array {
