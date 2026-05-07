@@ -33,6 +33,7 @@ type ValidationResultEntry = {
   status: ValidationResultStatus;
   target: string;
   detail: string;
+  transcript: string;
 };
 
 export type AppTheme = 'light' | 'dark';
@@ -61,6 +62,7 @@ export type CertificateGadgetsAppInstance = {
 };
 
 const MAX_LOG_ENTRIES = 200;
+const MAX_VALIDATION_RESULTS = 200;
 
 if (typeof window !== 'undefined') window.CertGadgetsCore = CertGadgetsCore;
 
@@ -93,7 +95,6 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
               </div>
             </div>
             <button id="closeDocumentButton" type="button">Close</button>
-            <button id="onlineCheckButton" type="button">Online Check</button>
             <input id="certificateInput" class="visually-hidden" type="file" accept=".cer,.crt,.der,.pem,application/pkix-cert,application/x-x509-ca-cert" />
           </nav>
           <section class="certificate-card">
@@ -161,7 +162,6 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   const saveDerFileButton = query<HTMLButtonElement>(app, '#saveDerFileButton');
   const savePemFileButton = query<HTMLButtonElement>(app, '#savePemFileButton');
   const closeDocumentButton = query<HTMLButtonElement>(app, '#closeDocumentButton');
-  const onlineCheckButton = query<HTMLButtonElement>(app, '#onlineCheckButton');
   const certificateInput = query<HTMLInputElement>(app, '#certificateInput');
   const certificateTree = query<HTMLElement>(app, '#certificateTree');
   const validationResizer = query<HTMLElement>(app, '#validationResizer');
@@ -180,6 +180,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
   let certificateDocuments: CertificateDocument[] = [];
   let selectedNodeId: string | null = null;
+  let selectedValidationResultId: string | null = null;
   let viewer: PkiStudioViewerInstance | null = null;
   let validationResults: ValidationResultEntry[] = [];
 
@@ -208,6 +209,11 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
   clearValidationResultsButton.addEventListener('click', () => {
     validationResults = [];
+    if (selectedValidationResultId) {
+      selectedValidationResultId = null;
+      showDetailContent();
+      renderEmptyDetail(detailContent);
+    }
     renderValidationResults();
   });
 
@@ -247,16 +253,32 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     await loadCertificateFile(file);
   });
 
-  onlineCheckButton.addEventListener('click', async () => {
-    const selectedCertificate = getSelectedCertificate();
-    if (!selectedCertificate) return;
-    await runOnlineCheck(selectedCertificate);
-  });
-
   certificateTree.addEventListener('click', (event) => {
     const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-node-id]') : null;
     if (!button) return;
     selectNode(button.dataset.nodeId ?? '');
+  });
+
+  validationResultsBody.addEventListener('click', (event) => {
+    const row = event.target instanceof Element ? event.target.closest<HTMLTableRowElement>('[data-validation-result-id]') : null;
+    if (!row) return;
+    selectValidationResult(row.dataset.validationResultId ?? '');
+  });
+
+  validationResultsBody.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const row = event.target instanceof Element ? event.target.closest<HTMLTableRowElement>('[data-validation-result-id]') : null;
+    if (!row) return;
+    event.preventDefault();
+    selectValidationResult(row.dataset.validationResultId ?? '');
+  });
+
+  detailContent.addEventListener('click', async (event) => {
+    const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-action="run-network-validation"]') : null;
+    if (!button) return;
+    const node = selectedNodeId ? findNode(selectedNodeId) : null;
+    if (!node?.networkUrl) return;
+    await runNetworkValidationPlan(createNetworkValidationPlan(node));
   });
 
   document.addEventListener('click', (event) => {
@@ -378,38 +400,43 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     logOperation(apiLogList, 'PEM.save', `Saved ${document.sourceName} as PEM (${bytes.byteLength} DER bytes).`);
   }
 
-  async function runOnlineCheck(document: CertificateDocument): Promise<void> {
-    const plans = CertGadgetsCore.collectNetworkValidationPlans(document);
-    if (plans.length === 0) {
-      setNotice('No network validation resources were found for the selected certificate.');
-      logOperation(apiLogList, 'Network.plan', 'No CRL, OCSP, AIA, or issuer URLs are available.');
-      addValidationResult('OK', 'Network resources', `${document.label}: no CRL, OCSP, AIA, or issuer URLs were found.`);
+  async function runNetworkValidationPlan(plan: NetworkValidationPlan): Promise<void> {
+    const target = getValidationTargetLabel(plan);
+    const transcript = [
+      createTranscriptLine(`Prepared ${target} validation for ${plan.reason}.`),
+      createTranscriptLine(`Operation: ${plan.operation}`),
+      createTranscriptLine(`URL: ${plan.url}`)
+    ];
+    const resultId = addValidationResult('...', target, `${plan.operation} requested for ${plan.reason}. URL: ${plan.url}`, transcript.join('\n'));
+    setNotice(`Running ${target} validation...`);
+    logOperation(apiLogList, 'Network.request', `${plan.reason}: ${plan.url}`);
+    transcript.push(createTranscriptLine('Asking host/user for explicit network access approval.'));
+    const confirmed = await confirmNetworkAccess(plan);
+    if (!confirmed) {
+      transcript.push(createTranscriptLine('Network access was denied. No request was sent.'));
+      updateValidationResult(resultId, 'NG', `User blocked ${plan.operation}. URL: ${plan.url}`, transcript.join('\n'));
+      setNotice(`${target} validation was blocked.`, true);
+      logOperation(apiLogList, 'Network.blocked', `${plan.url} was not requested.`, 'error');
       return;
     }
 
-    setNotice(`Running ${plans.length} explicit network-assisted check${plans.length === 1 ? '' : 's'}...`);
-    for (const plan of plans) {
-      const target = getValidationTargetLabel(plan);
-      const resultId = addValidationResult('...', target, `${plan.operation} requested for ${plan.reason}. URL: ${plan.url}`);
-      logOperation(apiLogList, 'Network.request', `${plan.reason}: ${plan.url}`);
-      const confirmed = await confirmNetworkAccess(plan);
-      if (!confirmed) {
-        updateValidationResult(resultId, 'NG', `User blocked ${plan.operation}. URL: ${plan.url}`);
-        logOperation(apiLogList, 'Network.blocked', `${plan.url} was not requested.`, 'error');
-        continue;
-      }
-
-      try {
-        const result = await fetchNetworkResource(plan);
-        updateValidationResult(resultId, result.status >= 200 && result.status < 400 ? 'OK' : 'NG', `${plan.operation} completed with HTTP status ${result.status}; received ${result.byteLength} bytes from ${plan.url}.`);
-        logOperation(apiLogList, plan.operation, `${plan.url} -> status ${result.status}, ${result.byteLength} bytes.`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        updateValidationResult(resultId, 'NG', `${plan.operation} failed for ${plan.url}. ${message}`);
-        logOperation(apiLogList, plan.operation, `${plan.url} -> ${message}`, 'error');
-      }
+    try {
+      transcript.push(createTranscriptLine('Network access approved. Sending request.'));
+      const result = await fetchNetworkResource(plan);
+      const status: ValidationResultStatus = result.status >= 200 && result.status < 400 ? 'OK' : 'NG';
+      transcript.push(createTranscriptLine(`Received HTTP status ${result.status}.`));
+      transcript.push(createTranscriptLine(`Received ${result.byteLength} bytes.`));
+      transcript.push(...createValidationFollowUpTranscript(plan, result));
+      updateValidationResult(resultId, status, `${plan.operation} completed with HTTP status ${result.status}; received ${result.byteLength} bytes from ${plan.url}.`, transcript.join('\n'));
+      setNotice(`${target} validation finished with ${status}.`, status === 'NG');
+      logOperation(apiLogList, plan.operation, `${plan.url} -> status ${result.status}, ${result.byteLength} bytes.`, status === 'NG' ? 'error' : 'ok');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      transcript.push(createTranscriptLine(`Request failed: ${message}`));
+      updateValidationResult(resultId, 'NG', `${plan.operation} failed for ${plan.url}. ${message}`, transcript.join('\n'));
+      setNotice(`${target} validation failed.`, true);
+      logOperation(apiLogList, plan.operation, `${plan.url} -> ${message}`, 'error');
     }
-    setNotice('Network-assisted checks finished. See the operation log for every attempted access.');
   }
 
   async function confirmNetworkAccess(plan: NetworkValidationPlan): Promise<boolean> {
@@ -434,22 +461,25 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     certificateTree.innerHTML = certificateDocuments.map((document) => renderTreeNode(document.root, 0, selectedNodeId)).join('');
   }
 
-  function addValidationResult(status: ValidationResultStatus, target: string, detail: string): string {
+  function addValidationResult(status: ValidationResultStatus, target: string, detail: string, transcript: string): string {
     const id = crypto.randomUUID?.() ?? `validation-${Date.now()}-${validationResults.length}`;
-    validationResults = [{ id, timestamp: new Date(), status, target, detail }, ...validationResults];
+    validationResults = [...validationResults, { id, timestamp: new Date(), status, target, detail, transcript }];
+    while (validationResults.length > MAX_VALIDATION_RESULTS) validationResults.shift();
+    if (selectedValidationResultId && !validationResults.some((entry) => entry.id === selectedValidationResultId)) selectedValidationResultId = null;
     renderValidationResults();
     return id;
   }
 
-  function updateValidationResult(id: string, status: ValidationResultStatus, detail: string): void {
-    validationResults = validationResults.map((entry) => entry.id === id ? { ...entry, timestamp: new Date(), status, detail } : entry);
+  function updateValidationResult(id: string, status: ValidationResultStatus, detail: string, transcript: string): void {
+    validationResults = validationResults.map((entry) => entry.id === id ? { ...entry, timestamp: new Date(), status, detail, transcript } : entry);
     renderValidationResults();
+    if (selectedValidationResultId === id) renderSelectedValidationResult();
   }
 
   function renderValidationResults(): void {
-    const sortedResults = [...validationResults].sort((left, right) => right.timestamp.getTime() - left.timestamp.getTime());
+    const sortedResults = [...validationResults].sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime());
     validationResultsBody.innerHTML = sortedResults.map((entry) => `
-      <tr class="${entry.status === 'NG' ? 'ng' : entry.status === 'OK' ? 'ok' : 'pending'}">
+      <tr class="${entry.status === 'NG' ? 'ng' : entry.status === 'OK' ? 'ok' : 'pending'}${entry.id === selectedValidationResultId ? ' selected' : ''}" data-validation-result-id="${escapeHtml(entry.id)}" tabindex="0">
         <td><time datetime="${entry.timestamp.toISOString()}">${formatLogTimestamp(entry.timestamp)}</time></td>
         <td>${entry.status}</td>
         <td>${escapeHtml(entry.target)}</td>
@@ -461,9 +491,30 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   function selectNode(nodeId: string): void {
     if (!findNode(nodeId)) return;
     selectedNodeId = nodeId;
+    selectedValidationResultId = null;
     renderCertificateTree();
+    renderValidationResults();
     showSelectedNode();
     updateActions();
+  }
+
+  function selectValidationResult(resultId: string): void {
+    const result = validationResults.find((entry) => entry.id === resultId);
+    if (!result) return;
+    selectedValidationResultId = resultId;
+    selectedNodeId = null;
+    renderCertificateTree();
+    renderValidationResults();
+    showDetailContent();
+    renderValidationResultDetail(detailContent, result);
+    updateActions();
+  }
+
+  function renderSelectedValidationResult(): void {
+    const result = selectedValidationResultId ? validationResults.find((entry) => entry.id === selectedValidationResultId) : null;
+    if (!result) return;
+    showDetailContent();
+    renderValidationResultDetail(detailContent, result);
   }
 
   function showSelectedNode(): void {
@@ -492,7 +543,6 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   }
 
   function updateActions(): void {
-    onlineCheckButton.disabled = certificateDocuments.length === 0;
     saveDerFileButton.disabled = !Boolean(selectedNodeId && findNode(selectedNodeId)?.derBytes);
     savePemFileButton.disabled = certificateDocuments.length === 0;
     closeDocumentButton.disabled = certificateDocuments.length === 0;
@@ -642,6 +692,7 @@ function renderValidationDetail(detailPane: HTMLElement, node: CertificateTreeNo
 }
 
 function renderNetworkDetail(detailPane: HTMLElement, node: CertificateTreeNode): void {
+  const plan = node.networkUrl ? createNetworkValidationPlan(node) : null;
   detailPane.innerHTML = `
     <section class="detail-surface" data-certgadgets-selected-node="${escapeHtml(node.id)}">
       <header class="detail-header">
@@ -653,7 +704,34 @@ function renderNetworkDetail(detailPane: HTMLElement, node: CertificateTreeNode)
         <span>Target</span>
         <code>${escapeHtml(node.networkUrl ?? '(none)')}</code>
       </div>
-      <p class="detail-note">Use Online Check to run this class of operation. Every attempted access is recorded in the bottom log pane.</p>
+      ${plan ? `
+        <section class="network-action">
+          <p>${escapeHtml(getNetworkValidationDescription(plan))}</p>
+          <button type="button" data-action="run-network-validation">Run ${escapeHtml(getValidationTargetLabel(plan))}</button>
+        </section>
+      ` : '<p class="detail-note">No network validation target is available for this item.</p>'}
+    </section>
+  `;
+}
+
+function renderValidationResultDetail(detailPane: HTMLElement, result: ValidationResultEntry): void {
+  detailPane.innerHTML = `
+    <section class="detail-surface" data-certgadgets-validation-result="${escapeHtml(result.id)}">
+      <header class="detail-header">
+        <p class="detail-kicker">validation result</p>
+        <h1>${escapeHtml(result.target)}</h1>
+      </header>
+      <dl class="detail-list">
+        <div><dt>Date</dt><dd>${escapeHtml(formatLogTimestamp(result.timestamp))}</dd></div>
+        <div><dt>Result</dt><dd>${escapeHtml(result.status)}</dd></div>
+        <div><dt>Target</dt><dd>${escapeHtml(result.target)}</dd></div>
+        <div><dt>Summary</dt><dd>${escapeHtml(result.detail)}</dd></div>
+      </dl>
+      <div class="policy-box">This view shows the hidden Validation detail field recorded for the selected result row. It includes the explicit network approval step, the request outcome, and target-specific follow-up checks.</div>
+      <section class="validation-transcript">
+        <h2>Detail Log</h2>
+        <pre>${escapeHtml(result.transcript)}</pre>
+      </section>
     </section>
   `;
 }
@@ -806,6 +884,47 @@ function getValidationTargetLabel(plan: NetworkValidationPlan): string {
   if (/issuer|ca issuers|\.cer(?:$|[?#])/i.test(source)) return 'AIA CA Issuers';
   if (/authority information access/i.test(source)) return 'AIA';
   return plan.reason;
+}
+
+function createNetworkValidationPlan(node: CertificateTreeNode): NetworkValidationPlan {
+  const url = node.networkUrl ?? '';
+  return {
+    operation: /ocsp/i.test(`${node.label} ${url}`) ? 'OCSP.query' : 'HTTP.fetch',
+    reason: node.label,
+    url
+  };
+}
+
+function getNetworkValidationDescription(plan: NetworkValidationPlan): string {
+  const target = getValidationTargetLabel(plan);
+  if (target === 'CDP') return 'Fetch the certificate revocation list from this CRL Distribution Point over the network, then record the HTTP result in the Validation pane and operation log.';
+  if (target === 'OCSP') return 'Send an OCSP validation request to this responder endpoint over the network, then record the response status in the Validation pane and operation log.';
+  if (target === 'AIA CA Issuers') return 'Fetch the issuer certificate from this Authority Information Access CA Issuers URL over the network, then record the HTTP result in the Validation pane and operation log.';
+  if (target === 'AIA') return 'Use this Authority Information Access URL for an explicit network-assisted validation request, then record the result in the Validation pane and operation log.';
+  return 'Run this explicit network-assisted validation request and record the result in the Validation pane and operation log.';
+}
+
+function createValidationFollowUpTranscript(plan: NetworkValidationPlan, result: { status: number; byteLength: number }): string[] {
+  const target = getValidationTargetLabel(plan);
+  if (result.status < 200 || result.status >= 400) return [createTranscriptLine(`Skipped ${target} content checks because HTTP status ${result.status} is not successful.`)];
+  if (target === 'CDP') return [
+    createTranscriptLine('CRL bytes received. Queued DER/PEM decoding check.'),
+    createTranscriptLine('CRL issuer, thisUpdate, nextUpdate, and revoked-certificate entries would be inspected here.'),
+    createTranscriptLine('Certificate revocation matching is not performed silently beyond this explicit operation in the current prototype.')
+  ];
+  if (target === 'OCSP') return [
+    createTranscriptLine('OCSP response bytes received. Queued responseStatus and BasicOCSPResponse decoding check.'),
+    createTranscriptLine('Certificate status, producedAt, thisUpdate, nextUpdate, and responder identity would be inspected here.')
+  ];
+  if (target === 'AIA CA Issuers') return [
+    createTranscriptLine('Issuer-certificate bytes received. Queued X.509 parsing check.'),
+    createTranscriptLine('Issuer subject/authority key data would be compared against the loaded certificate in a full validation flow.')
+  ];
+  return [createTranscriptLine(`${target} response bytes received. Queued target-specific parsing checks.`)];
+}
+
+function createTranscriptLine(message: string): string {
+  return `[${formatLogTimestamp(new Date())}] ${message}`;
 }
 
 function logOperation(apiLogList: HTMLElement, operation: string, detail: string, status: 'ok' | 'error' = 'ok'): void {

@@ -377,6 +377,20 @@ button:disabled {
   vertical-align: top;
 }
 
+.validation-results tbody tr {
+  cursor: pointer;
+}
+
+.validation-results tbody tr:hover,
+.validation-results tbody tr:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.validation-results tbody tr.selected {
+  background: var(--selection);
+}
+
 .validation-results th {
   position: sticky;
   top: 0;
@@ -818,7 +832,9 @@ button:disabled {
 }
 
 .policy-box,
+.network-action,
 .network-target,
+.validation-transcript,
 .hex-preview {
   border: 1px solid var(--subtle-border);
   border-radius: 3px;
@@ -831,9 +847,48 @@ button:disabled {
   gap: 4px;
 }
 
+.network-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.network-action p {
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.network-action button {
+  flex: 0 0 auto;
+}
+
 .network-target span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.validation-transcript {
+  display: grid;
+  gap: 8px;
+}
+
+.validation-transcript h2 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.validation-transcript pre {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .network-target code,
