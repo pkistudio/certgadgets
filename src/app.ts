@@ -31,6 +31,7 @@ type ValidationResultEntry = {
   id: string;
   timestamp: Date;
   status: ValidationResultStatus;
+  target: string;
   detail: string;
 };
 
@@ -118,6 +119,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
               <tr>
                 <th scope="col">Date</th>
                 <th scope="col">Result</th>
+                <th scope="col">Target</th>
                 <th scope="col">Detail</th>
               </tr>
             </thead>
@@ -381,28 +383,29 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     if (plans.length === 0) {
       setNotice('No network validation resources were found for the selected certificate.');
       logOperation(apiLogList, 'Network.plan', 'No CRL, OCSP, AIA, or issuer URLs are available.');
-      addValidationResult('OK', `${document.label}: no network validation resources found`);
+      addValidationResult('OK', 'Network resources', `${document.label}: no CRL, OCSP, AIA, or issuer URLs were found.`);
       return;
     }
 
     setNotice(`Running ${plans.length} explicit network-assisted check${plans.length === 1 ? '' : 's'}...`);
     for (const plan of plans) {
-      const resultId = addValidationResult('...', `${plan.operation}: ${plan.url}`);
+      const target = getValidationTargetLabel(plan);
+      const resultId = addValidationResult('...', target, `${plan.operation} requested for ${plan.reason}. URL: ${plan.url}`);
       logOperation(apiLogList, 'Network.request', `${plan.reason}: ${plan.url}`);
       const confirmed = await confirmNetworkAccess(plan);
       if (!confirmed) {
-        updateValidationResult(resultId, 'NG', `${plan.operation}: blocked ${plan.url}`);
+        updateValidationResult(resultId, 'NG', `User blocked ${plan.operation}. URL: ${plan.url}`);
         logOperation(apiLogList, 'Network.blocked', `${plan.url} was not requested.`, 'error');
         continue;
       }
 
       try {
         const result = await fetchNetworkResource(plan);
-        updateValidationResult(resultId, result.status >= 200 && result.status < 400 ? 'OK' : 'NG', `${plan.operation}: status ${result.status}, ${result.byteLength} bytes`);
+        updateValidationResult(resultId, result.status >= 200 && result.status < 400 ? 'OK' : 'NG', `${plan.operation} completed with HTTP status ${result.status}; received ${result.byteLength} bytes from ${plan.url}.`);
         logOperation(apiLogList, plan.operation, `${plan.url} -> status ${result.status}, ${result.byteLength} bytes.`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        updateValidationResult(resultId, 'NG', `${plan.operation}: ${message}`);
+        updateValidationResult(resultId, 'NG', `${plan.operation} failed for ${plan.url}. ${message}`);
         logOperation(apiLogList, plan.operation, `${plan.url} -> ${message}`, 'error');
       }
     }
@@ -431,9 +434,9 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     certificateTree.innerHTML = certificateDocuments.map((document) => renderTreeNode(document.root, 0, selectedNodeId)).join('');
   }
 
-  function addValidationResult(status: ValidationResultStatus, detail: string): string {
+  function addValidationResult(status: ValidationResultStatus, target: string, detail: string): string {
     const id = crypto.randomUUID?.() ?? `validation-${Date.now()}-${validationResults.length}`;
-    validationResults = [{ id, timestamp: new Date(), status, detail }, ...validationResults];
+    validationResults = [{ id, timestamp: new Date(), status, target, detail }, ...validationResults];
     renderValidationResults();
     return id;
   }
@@ -449,6 +452,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
       <tr class="${entry.status === 'NG' ? 'ng' : entry.status === 'OK' ? 'ok' : 'pending'}">
         <td><time datetime="${entry.timestamp.toISOString()}">${formatLogTimestamp(entry.timestamp)}</time></td>
         <td>${entry.status}</td>
+        <td>${escapeHtml(entry.target)}</td>
         <td>${escapeHtml(entry.detail)}</td>
       </tr>
     `).join('');
@@ -793,6 +797,15 @@ function findNodeInTree(node: CertificateTreeNode, nodeId: string): CertificateT
     if (found) return found;
   }
   return null;
+}
+
+function getValidationTargetLabel(plan: NetworkValidationPlan): string {
+  const source = `${plan.reason} ${plan.operation} ${plan.url}`;
+  if (/ocsp/i.test(source)) return 'OCSP';
+  if (/crl|\.crl(?:$|[?#])/i.test(source)) return 'CDP';
+  if (/issuer|ca issuers|\.cer(?:$|[?#])/i.test(source)) return 'AIA CA Issuers';
+  if (/authority information access/i.test(source)) return 'AIA';
+  return plan.reason;
 }
 
 function logOperation(apiLogList: HTMLElement, operation: string, detail: string, status: 'ok' | 'error' = 'ok'): void {

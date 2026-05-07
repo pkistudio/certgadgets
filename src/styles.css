@@ -362,7 +362,7 @@ button:disabled {
 
 .validation-results {
   width: 100%;
-  min-width: 640px;
+  min-width: 760px;
   border-collapse: collapse;
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
@@ -395,6 +395,12 @@ button:disabled {
 .validation-results td:nth-child(2) {
   width: 48px;
   font-weight: 700;
+  white-space: nowrap;
+}
+
+.validation-results td:nth-child(3) {
+  width: 150px;
+  color: var(--api-log-operation);
   white-space: nowrap;
 }
 
