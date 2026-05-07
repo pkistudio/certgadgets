@@ -45,7 +45,10 @@ type ValidationDataArtifact = {
   direction: 'sent' | 'received';
   bytes: Uint8Array;
   mediaType?: string;
+  contentKind: ValidationDataArtifactKind;
 };
+
+type ValidationDataArtifactKind = 'certificate' | 'asn1' | 'raw';
 
 type NetworkFetchResult = {
   status: number;
@@ -712,6 +715,11 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     if (!result || !artifact) return;
 
     const artifactLabel = `${artifact.direction} ${artifact.label}`;
+    if (isValidationArtifactCertificate(artifact)) {
+      openCertificateArtifact(artifact.bytes, artifactLabel);
+      return;
+    }
+
     const viewerBytes = prepareArtifactBytesForViewer(artifact.bytes, artifactLabel);
     if (!viewerBytes) return;
 
@@ -740,6 +748,34 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     }
     artifactWindow.opener = null;
     logOperation(apiLogList, 'Validation.openViewer', `${viewerBytes.label} opened in ASN.1 viewer.`);
+  }
+
+  function openCertificateArtifact(bytes: Uint8Array, label: string): void {
+    const key = `certgadgets-certificate-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const payload = {
+      label,
+      bytes: bytesToBase64(bytes)
+    };
+
+    try {
+      localStorage.setItem(key, JSON.stringify(payload));
+    } catch (error) {
+      logOperation(apiLogList, 'Validation.openCertGadgets', error instanceof Error ? error.message : String(error), 'error');
+      return;
+    }
+
+    const url = new URL('index.html', window.location.href);
+    url.searchParams.set('certificate', key);
+    const theme = document.documentElement.dataset.certgadgetsTheme;
+    if (theme) url.searchParams.set('theme', theme);
+    const certificateWindow = window.open(url.toString(), '_blank');
+    if (!certificateWindow) {
+      localStorage.removeItem(key);
+      logOperation(apiLogList, 'Validation.openCertGadgets', `${label} could not be opened because the popup was blocked.`, 'error');
+      return;
+    }
+    certificateWindow.opener = null;
+    logOperation(apiLogList, 'Validation.openCertGadgets', `${label} opened in Certificate Gadgets.`);
   }
 
   return {
@@ -886,11 +922,23 @@ function renderValidationArtifacts(result: ValidationResultEntry): string {
     <section class="validation-artifacts">
       ${result.artifacts.map((artifact) => `
         <button type="button" data-action="open-validation-artifact" data-validation-result-id="${escapeHtml(result.id)}" data-artifact-id="${escapeHtml(artifact.id)}">
-          Open ${escapeHtml(artifact.direction)} ${escapeHtml(artifact.label)} (${artifact.bytes.byteLength} bytes)
+          ${escapeHtml(getValidationArtifactButtonLabel(artifact))}
         </button>
       `).join('')}
     </section>
   `;
+}
+
+function getValidationArtifactButtonLabel(artifact: ValidationDataArtifact): string {
+  const opener = isValidationArtifactCertificate(artifact) ? 'CertGadgets' : 'ASN.1 viewer';
+  const kind = getValidationArtifactKindLabel(artifact);
+  return `Open ${artifact.direction} ${artifact.label} as ${kind} in ${opener} (${artifact.bytes.byteLength} bytes)`;
+}
+
+function getValidationArtifactKindLabel(artifact: ValidationDataArtifact): string {
+  if (isValidationArtifactCertificate(artifact)) return 'certificate';
+  if (artifact.contentKind === 'asn1') return 'ASN.1';
+  return 'raw bytes';
 }
 
 function renderDetailList(node: CertificateTreeNode): string {
@@ -1247,36 +1295,67 @@ function createValidationArtifacts(plan: NetworkValidationPlan, result: NetworkF
   const sentMediaType = result.sentMediaType ?? plan.requestMediaType;
 
   if (plan.issuerCertificateBytes && plan.issuerCertificateBytes.byteLength > 0) {
-    artifacts.push({
+    artifacts.push(createValidationDataArtifact({
       id: 'issuer-certificate-1',
       label: 'AIA CA Issuers certificate',
       direction: 'received',
       bytes: plan.issuerCertificateBytes,
       mediaType: plan.issuerCertificateMediaType
-    });
+    }));
   }
 
   if (sentBytes && sentBytes.byteLength > 0) {
-    artifacts.push({
+    artifacts.push(createValidationDataArtifact({
       id: 'sent-1',
       label: `${getValidationTargetLabel(plan)} request`,
       direction: 'sent',
       bytes: sentBytes,
       mediaType: sentMediaType
-    });
+    }));
   }
 
   if (result.bytes && result.bytes.byteLength > 0) {
-    artifacts.push({
+    artifacts.push(createValidationDataArtifact({
       id: 'received-1',
       label: `${getValidationTargetLabel(plan)} response`,
       direction: 'received',
       bytes: result.bytes,
       mediaType: result.mediaType
-    });
+    }));
   }
 
   return artifacts;
+}
+
+function createValidationDataArtifact(artifact: Omit<ValidationDataArtifact, 'contentKind'>): ValidationDataArtifact {
+  return {
+    ...artifact,
+    contentKind: detectValidationDataArtifactKind(artifact.bytes, artifact.mediaType)
+  };
+}
+
+function detectValidationDataArtifactKind(bytes: Uint8Array, mediaType?: string): ValidationDataArtifactKind {
+  if (isCertificateBytes(bytes, mediaType)) return 'certificate';
+  if (canDecodeAsn1(bytes)) return 'asn1';
+  return 'raw';
+}
+
+function isValidationArtifactCertificate(artifact: ValidationDataArtifact): boolean {
+  return artifact.contentKind === 'certificate' || isCertificateBytes(artifact.bytes, artifact.mediaType);
+}
+
+function isCertificateBytes(bytes: Uint8Array, mediaType?: string): boolean {
+  if (mediaType && /(?:application\/(?:pkix-cert|x-x509-ca-cert)|certificate)/i.test(mediaType)) return canParseCertificateBytes(bytes);
+  return canParseCertificateBytes(bytes);
+}
+
+function canParseCertificateBytes(bytes: Uint8Array): boolean {
+  try {
+    Certificate.fromBER(toArrayBuffer(normalizeCertificateBytes(bytes)));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 type OcspResponseAssessment = {
