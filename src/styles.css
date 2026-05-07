@@ -824,6 +824,20 @@ button:disabled {
   padding-bottom: 10px;
 }
 
+.detail-header-with-action {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.detail-header-with-action > div {
+  min-width: 0;
+}
+
+.detail-header-with-action button {
+  align-self: end;
+}
+
 .detail-kicker {
   margin: 0;
   color: var(--muted);
@@ -879,10 +893,7 @@ button:disabled {
 }
 
 .network-action {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: block;
 }
 
 .network-action p {
@@ -890,10 +901,6 @@ button:disabled {
   margin: 0;
   color: var(--muted);
   line-height: 1.45;
-}
-
-.network-action button {
-  flex: 0 0 auto;
 }
 
 .network-target span {

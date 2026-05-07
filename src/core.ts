@@ -1,5 +1,5 @@
 import * as asn1js from 'asn1js';
-import { Certificate, type Extension, type GeneralName, type RelativeDistinguishedNames } from 'pkijs';
+import { Certificate, InfoAccess, type Extension, type GeneralName, type RelativeDistinguishedNames } from 'pkijs';
 
 export type CertificateNodeKind =
   | 'certificate'
@@ -34,8 +34,11 @@ export type CertificateTreeNode = {
   details?: CertificateDetail[];
   derBytes?: Uint8Array;
   networkUrl?: string;
+  networkKind?: NetworkResourceKind;
   children?: CertificateTreeNode[];
 };
+
+export type NetworkResourceKind = 'ocsp' | 'ca-issuers' | 'crl' | 'generic';
 
 export type CertificateDocument = {
   id: string;
@@ -51,8 +54,13 @@ export type NetworkValidationPlan = {
   reason: string;
   url: string;
   method?: string;
+  acceptMediaType?: string;
   requestBytes?: Uint8Array;
   requestMediaType?: string;
+  targetCertificateBytes?: Uint8Array;
+  issuerCertificateBytes?: Uint8Array;
+  issuerCertificateMediaType?: string;
+  issuerCertificateUrl?: string;
 };
 
 export type CertGadgetsCoreApi = {
@@ -138,7 +146,7 @@ export function collectNetworkValidationPlans(document: CertificateDocument): Ne
   const planKeys = new Set<string>();
   walkNodes(document.root, (node) => {
     if (!node.networkUrl) return;
-    const operation = getNetworkOperation(node.label, node.networkUrl);
+    const operation = getNetworkOperation(node.label, node.networkUrl, node.networkKind);
     const planKey = `${operation}:${node.networkUrl}`;
     if (planKeys.has(planKey)) return;
     planKeys.add(planKey);
@@ -262,30 +270,39 @@ type ExtensionInput = {
   summary: string;
   derBytes: Uint8Array;
   details: CertificateDetail[];
-  networkUrls: string[];
+  networkResources: ExtensionNetworkResource[];
+};
+
+type ExtensionNetworkResource = {
+  label: string;
+  url: string;
+  kind: NetworkResourceKind;
 };
 
 function createExtension(parentId: string, extension: ExtensionInput): CertificateTreeNode {
-  const [networkUrl] = extension.networkUrls;
+  const [networkResource] = extension.networkResources;
   return {
     id: `${parentId}:extension:${extension.id}`,
     kind: 'extension',
     label: extension.label,
-    note: networkUrl ? 'network resource' : extension.summary,
-    view: networkUrl ? 'network' : 'extension',
+    note: networkResource ? 'network resource' : extension.summary,
+    view: networkResource ? 'network' : 'extension',
     derBytes: extension.derBytes,
-    networkUrl,
+    networkUrl: networkResource?.url,
+    networkKind: networkResource?.kind,
     details: extension.details,
-    children: extension.networkUrls.slice(1).map((url, index) => ({
+    children: extension.networkResources.slice(1).map((resource, index) => ({
       id: `${parentId}:extension:${extension.id}:network-${index}`,
       kind: 'network-resource',
-      label: getNetworkResourceLabel(extension.label, url),
+      label: resource.label,
       note: 'explicit',
       view: 'network',
-      networkUrl: url,
+      networkUrl: resource.url,
+      networkKind: resource.kind,
       details: [
         { label: 'Source', value: extension.label },
-        { label: 'Target', value: url }
+        { label: 'Access method', value: resource.label },
+        { label: 'Target', value: resource.url }
       ]
     }))
   };
@@ -293,7 +310,8 @@ function createExtension(parentId: string, extension: ExtensionInput): Certifica
 
 function createExtensionInput(extension: Extension): ExtensionInput {
   const label = getExtensionName(extension.extnID);
-  const networkUrls = collectUrlsFromExtension(extension);
+  const networkResources = collectNetworkResourcesFromExtension(extension);
+  const networkUrls = networkResources.map((resource) => resource.url);
   const details: CertificateDetail[] = [
     { label: 'OID', value: extension.extnID },
     { label: 'Critical', value: extension.critical ? 'true' : 'false' },
@@ -310,7 +328,7 @@ function createExtensionInput(extension: Extension): ExtensionInput {
     summary: decodedValues[0] ?? `${extension.extnID}${extension.critical ? ' critical' : ''}`,
     derBytes: toBytes(extension.toSchema().toBER(false)),
     details,
-    networkUrls
+    networkResources
   };
 }
 
@@ -323,22 +341,22 @@ function createDemoExtensions(): ExtensionInput[] {
     createDemoExtension('basic-constraints', 'Basic Constraints', 'CA: false'),
     createDemoExtension('key-usage', 'Key Usage', 'Digital Signature, Key Encipherment'),
     createDemoExtension('san', 'Subject Alternative Name', 'DNS:www.example.test'),
-    createDemoExtension('crl-dp', 'CRL Distribution Points', 'demo CRL fixture', [demoCrlUrl]),
+    createDemoExtension('crl-dp', 'CRL Distribution Points', 'demo CRL fixture', [{ kind: 'crl', label: 'Fetch CRL', url: demoCrlUrl }]),
     createDemoExtension('aia', 'Authority Information Access', 'OCSP demo fixture, CA Issuers demo fixture', [
-      demoOcspUrl,
-      demoIssuerUrl
+      { kind: 'ocsp', label: 'Query OCSP', url: demoOcspUrl },
+      { kind: 'ca-issuers', label: 'Fetch issuer certificate', url: demoIssuerUrl }
     ])
   ];
 }
 
-function createDemoExtension(id: string, label: string, summary: string, networkUrls: string[] = []): ExtensionInput {
+function createDemoExtension(id: string, label: string, summary: string, networkResources: ExtensionNetworkResource[] = []): ExtensionInput {
   return {
     id,
     label,
     summary,
     derBytes: mockBytes(label),
     details: [{ label: 'Value', value: summary }],
-    networkUrls
+    networkResources
   };
 }
 
@@ -451,10 +469,53 @@ function summarizeKnownExtension(extension: Extension, decoded: asn1js.AsnType):
   return `${getExtensionName(extension.extnID)} value (${extension.extnValue.valueBlock.valueHexView.byteLength} bytes)`;
 }
 
-function collectUrlsFromExtension(extension: Extension): string[] {
+function collectNetworkResourcesFromExtension(extension: Extension): ExtensionNetworkResource[] {
+  if (extension.extnID === '1.3.6.1.5.5.7.1.1') return collectAuthorityInformationAccessResources(extension);
+
   const decoded = decodeExtensionValue(extension);
   if (!decoded) return [];
-  return collectReadableStrings(decoded).filter((value) => /^https?:\/\//i.test(value));
+  return collectReadableStrings(decoded)
+    .filter((value) => /^https?:\/\//i.test(value))
+    .map((url) => createNetworkResource(getNetworkResourceKind(extension.extnID, getExtensionName(extension.extnID), url), getExtensionName(extension.extnID), url));
+}
+
+function collectAuthorityInformationAccessResources(extension: Extension): ExtensionNetworkResource[] {
+  const decoded = decodeExtensionValue(extension);
+  if (!decoded) return [];
+
+  try {
+    const infoAccess = new InfoAccess({ schema: decoded });
+    return infoAccess.accessDescriptions.flatMap((description) => {
+      const url = formatGeneralName(description.accessLocation);
+      if (!/^https?:\/\//i.test(url)) return [];
+      return [createNetworkResource(getAiaNetworkResourceKind(description.accessMethod), 'Authority Information Access', url)];
+    });
+  } catch {
+    return collectReadableStrings(decoded)
+      .filter((value) => /^https?:\/\//i.test(value))
+      .map((url) => createNetworkResource(getNetworkResourceKind(extension.extnID, 'Authority Information Access', url), 'Authority Information Access', url));
+  }
+}
+
+function getAiaNetworkResourceKind(accessMethod: string): NetworkResourceKind {
+  if (accessMethod === '1.3.6.1.5.5.7.48.1') return 'ocsp';
+  if (accessMethod === '1.3.6.1.5.5.7.48.2') return 'ca-issuers';
+  return 'generic';
+}
+
+function getNetworkResourceKind(extensionId: string, sourceLabel: string, url: string): NetworkResourceKind {
+  if (/ocsp/i.test(sourceLabel) || /ocsp/i.test(url)) return 'ocsp';
+  if (extensionId === '2.5.29.31' || /crl/i.test(sourceLabel) || /\.crl(?:$|[?#])/i.test(url)) return 'crl';
+  if (/issuer|ca issuers|\.cer(?:$|[?#])/i.test(`${sourceLabel} ${url}`)) return 'ca-issuers';
+  return 'generic';
+}
+
+function createNetworkResource(kind: NetworkResourceKind, sourceLabel: string, url: string): ExtensionNetworkResource {
+  return {
+    kind,
+    label: getNetworkResourceLabel(kind, sourceLabel, url),
+    url
+  };
 }
 
 function decodeExtensionValue(extension: Extension): asn1js.AsnType | null {
@@ -515,14 +576,15 @@ function formatIpAddress(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(':');
 }
 
-function getNetworkResourceLabel(sourceLabel: string, url: string): string {
-  if (/ocsp/i.test(sourceLabel) || /ocsp/i.test(url)) return 'Query OCSP';
-  if (/crl/i.test(sourceLabel) || /\.crl(?:$|[?#])/i.test(url)) return 'Fetch CRL';
-  return 'Fetch issuer certificate';
+function getNetworkResourceLabel(kind: NetworkResourceKind, sourceLabel: string, url: string): string {
+  if (kind === 'ocsp') return 'Query OCSP';
+  if (kind === 'crl') return 'Fetch CRL';
+  if (kind === 'ca-issuers') return 'Fetch issuer certificate';
+  return getNetworkResourceKind('', sourceLabel, url) === 'ocsp' ? 'Query OCSP' : 'Fetch network resource';
 }
 
-function getNetworkOperation(label: string, url: string): string {
-  return /ocsp/i.test(label) || /ocsp/i.test(url) ? 'OCSP.query' : 'HTTP.fetch';
+function getNetworkOperation(label: string, url: string, kind: NetworkResourceKind = 'generic'): string {
+  return kind === 'ocsp' || /ocsp/i.test(label) || /ocsp/i.test(url) ? 'OCSP.query' : 'HTTP.fetch';
 }
 
 function getExtensionName(oid: string): string {

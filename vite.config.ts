@@ -64,7 +64,9 @@ function certgadgetsDevFetchProxy(): Plugin {
 function createProxyTargetHeaders(request: IncomingMessage): Headers {
   const headers = new Headers();
   const contentType = request.headers['x-certgadgets-target-content-type']?.toString();
+  const accept = request.headers['x-certgadgets-target-accept']?.toString();
   if (contentType) headers.set('Content-Type', contentType);
+  if (accept) headers.set('Accept', accept);
   return headers;
 }
 
