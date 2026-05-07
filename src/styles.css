@@ -255,6 +255,7 @@ button:disabled {
 
 .toolbar button,
 .certificate-menu button,
+.validation-menu button,
 .api-log-header button {
   border-color: transparent;
   background: transparent;
@@ -265,6 +266,8 @@ button:disabled {
 .toolbar button:focus-visible,
 .certificate-menu button:hover,
 .certificate-menu button:focus-visible,
+.validation-menu button:hover,
+.validation-menu button:focus-visible,
 .api-log-header button:hover,
 .api-log-header button:focus-visible {
   border-color: var(--hover-border);
@@ -287,7 +290,8 @@ button:disabled {
 }
 
 .workspace.resizing,
-.shell.resizing-rows {
+.shell.resizing-rows,
+.shell.resizing-validation {
   user-select: none;
 }
 
@@ -322,11 +326,100 @@ button:disabled {
   overflow: hidden;
 }
 
+.validation-panel {
+  display: flex;
+  flex: 0 0 var(--validation-panel-height, clamp(128px, 17dvh, 210px));
+  flex-direction: column;
+  min-width: 0;
+  min-height: 96px;
+  margin: 6px 0 0;
+  overflow: hidden;
+}
+
+.validation-menu {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--panel-border);
+  border-bottom: 0;
+  padding: 4px;
+  background: linear-gradient(var(--chrome-start), var(--chrome));
+}
+
+.validation-menu strong {
+  padding: 4px 8px;
+}
+
+.validation-results-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--panel-border);
+  background: var(--window);
+}
+
+.validation-results {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.validation-results th,
+.validation-results td {
+  border-bottom: 1px solid var(--api-log-row-border);
+  padding: 3px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.validation-results th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--muted);
+  background: var(--chrome);
+  font-weight: 400;
+}
+
+.validation-results td:first-child {
+  width: 174px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.validation-results td:nth-child(2) {
+  width: 48px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.validation-results td:last-child {
+  overflow-wrap: anywhere;
+}
+
+.validation-results tr.ok td:nth-child(2) {
+  color: #047857;
+}
+
+.validation-results tr.ng td:nth-child(2) {
+  color: var(--danger);
+}
+
+.validation-results tr.pending td:nth-child(2) {
+  color: var(--muted);
+}
+
 .visually-hidden {
   display: none;
 }
 
 .pane-resizer,
+.validation-resizer,
 .api-log-resizer {
   position: relative;
   border: 1px solid transparent;
@@ -340,6 +433,7 @@ button:disabled {
   cursor: col-resize;
 }
 
+.validation-resizer,
 .api-log-resizer {
   flex: 0 0 6px;
   min-height: 6px;
@@ -350,6 +444,9 @@ button:disabled {
 .pane-resizer:hover,
 .pane-resizer:focus-visible,
 .workspace.resizing .pane-resizer,
+.validation-resizer:hover,
+.validation-resizer:focus-visible,
+.shell.resizing-validation .validation-resizer,
 .api-log-resizer:hover,
 .api-log-resizer:focus-visible,
 .shell.resizing-rows .api-log-resizer {
@@ -905,6 +1002,7 @@ button:disabled {
   }
 
   .pane-resizer,
+  .validation-resizer,
   .api-log-resizer {
     display: none;
   }

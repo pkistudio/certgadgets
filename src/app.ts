@@ -25,6 +25,15 @@ type SaveFileHandle = {
   createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
 };
 
+type ValidationResultStatus = 'OK' | 'NG' | '...';
+
+type ValidationResultEntry = {
+  id: string;
+  timestamp: Date;
+  status: ValidationResultStatus;
+  detail: string;
+};
+
 export type AppTheme = 'light' | 'dark';
 
 export type CertificateGadgetsHost = {
@@ -97,6 +106,25 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
           <div id="viewerMount" class="pkistudio-viewer-mount" hidden></div>
         </section>
       </section>
+      <div id="validationResizer" class="validation-resizer" role="separator" aria-label="Resize validation results" aria-orientation="horizontal" tabindex="0"></div>
+      <section class="validation-panel" aria-label="Validation results">
+        <header class="validation-menu">
+          <strong>Validation</strong>
+          <button id="clearValidationResultsButton" type="button">Clear</button>
+        </header>
+        <div class="validation-results-wrap">
+          <table class="validation-results">
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Result</th>
+                <th scope="col">Detail</th>
+              </tr>
+            </thead>
+            <tbody id="validationResultsBody"></tbody>
+          </table>
+        </div>
+      </section>
       <div id="apiLogResizer" class="api-log-resizer" role="separator" aria-label="Resize operation log" aria-orientation="horizontal" tabindex="0"></div>
       <section class="api-log-panel panel" aria-label="Operation log">
         <header class="api-log-header">
@@ -134,6 +162,10 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   const onlineCheckButton = query<HTMLButtonElement>(app, '#onlineCheckButton');
   const certificateInput = query<HTMLInputElement>(app, '#certificateInput');
   const certificateTree = query<HTMLElement>(app, '#certificateTree');
+  const validationResizer = query<HTMLElement>(app, '#validationResizer');
+  const validationPanel = query<HTMLElement>(app, '.validation-panel');
+  const validationResultsBody = query<HTMLTableSectionElement>(app, '#validationResultsBody');
+  const clearValidationResultsButton = query<HTMLButtonElement>(app, '#clearValidationResultsButton');
   const detailContent = query<HTMLElement>(app, '#detailContent');
   const viewerMount = query<HTMLElement>(app, '#viewerMount');
   const formNotice = query<HTMLElement>(app, '#formNotice');
@@ -147,12 +179,15 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   let certificateDocuments: CertificateDocument[] = [];
   let selectedNodeId: string | null = null;
   let viewer: PkiStudioViewerInstance | null = null;
+  let validationResults: ValidationResultEntry[] = [];
 
   applyRequestedTheme(options.theme);
   setupPaneResizer(workspace, paneResizer);
+  setupValidationResizer(app, workspace, validationPanel, validationResizer, apiLogResizer, apiLogPanel);
   setupApiLogResizer(app, workspace, apiLogPanel, apiLogList, apiLogResizer);
   bootViewer();
   logOperation(apiLogList, 'ready', 'Waiting for certificate activity.');
+  renderValidationResults();
   renderEmptyDetail(detailContent);
   updateActions();
   if (options.certificate) loadCertificateBytes(options.certificate.bytes, options.certificate.sourceName ?? 'external.der');
@@ -167,6 +202,11 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   clearApiLogButton.addEventListener('click', () => {
     apiLogList.replaceChildren();
     logOperation(apiLogList, 'clear', 'Operation log cleared.');
+  });
+
+  clearValidationResultsButton.addEventListener('click', () => {
+    validationResults = [];
+    renderValidationResults();
   });
 
   loadDemoButton.addEventListener('click', () => loadCertificate(CertGadgetsCore.createDemoCertificate(), 'Demo certificate loaded.'));
@@ -341,23 +381,28 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     if (plans.length === 0) {
       setNotice('No network validation resources were found for the selected certificate.');
       logOperation(apiLogList, 'Network.plan', 'No CRL, OCSP, AIA, or issuer URLs are available.');
+      addValidationResult('OK', `${document.label}: no network validation resources found`);
       return;
     }
 
     setNotice(`Running ${plans.length} explicit network-assisted check${plans.length === 1 ? '' : 's'}...`);
     for (const plan of plans) {
+      const resultId = addValidationResult('...', `${plan.operation}: ${plan.url}`);
       logOperation(apiLogList, 'Network.request', `${plan.reason}: ${plan.url}`);
       const confirmed = await confirmNetworkAccess(plan);
       if (!confirmed) {
+        updateValidationResult(resultId, 'NG', `${plan.operation}: blocked ${plan.url}`);
         logOperation(apiLogList, 'Network.blocked', `${plan.url} was not requested.`, 'error');
         continue;
       }
 
       try {
         const result = await fetchNetworkResource(plan);
+        updateValidationResult(resultId, result.status >= 200 && result.status < 400 ? 'OK' : 'NG', `${plan.operation}: status ${result.status}, ${result.byteLength} bytes`);
         logOperation(apiLogList, plan.operation, `${plan.url} -> status ${result.status}, ${result.byteLength} bytes.`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        updateValidationResult(resultId, 'NG', `${plan.operation}: ${message}`);
         logOperation(apiLogList, plan.operation, `${plan.url} -> ${message}`, 'error');
       }
     }
@@ -384,6 +429,29 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
     certificateTree.className = 'tree';
     certificateTree.innerHTML = certificateDocuments.map((document) => renderTreeNode(document.root, 0, selectedNodeId)).join('');
+  }
+
+  function addValidationResult(status: ValidationResultStatus, detail: string): string {
+    const id = crypto.randomUUID?.() ?? `validation-${Date.now()}-${validationResults.length}`;
+    validationResults = [{ id, timestamp: new Date(), status, detail }, ...validationResults];
+    renderValidationResults();
+    return id;
+  }
+
+  function updateValidationResult(id: string, status: ValidationResultStatus, detail: string): void {
+    validationResults = validationResults.map((entry) => entry.id === id ? { ...entry, timestamp: new Date(), status, detail } : entry);
+    renderValidationResults();
+  }
+
+  function renderValidationResults(): void {
+    const sortedResults = [...validationResults].sort((left, right) => right.timestamp.getTime() - left.timestamp.getTime());
+    validationResultsBody.innerHTML = sortedResults.map((entry) => `
+      <tr class="${entry.status === 'NG' ? 'ng' : entry.status === 'OK' ? 'ok' : 'pending'}">
+        <td><time datetime="${entry.timestamp.toISOString()}">${formatLogTimestamp(entry.timestamp)}</time></td>
+        <td>${entry.status}</td>
+        <td>${escapeHtml(entry.detail)}</td>
+      </tr>
+    `).join('');
   }
 
   function selectNode(nodeId: string): void {
@@ -808,6 +876,41 @@ function setupApiLogResizer(app: HTMLElement, workspace: HTMLElement, apiLogPane
   });
 }
 
+function setupValidationResizer(app: HTMLElement, workspace: HTMLElement, validationPanel: HTMLElement, validationResizer: HTMLElement, apiLogResizer: HTMLElement, apiLogPanel: HTMLElement): void {
+  const storedHeight = Number.parseInt(localStorage.getItem('certgadgets.validationPanelHeight') ?? '', 10);
+  setValidationHeight(workspace, validationPanel, validationResizer, apiLogResizer, apiLogPanel, Number.isFinite(storedHeight) ? storedHeight : 170, false);
+  let startY = 0;
+  let startHeight = 0;
+
+  validationResizer.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    startY = event.clientY;
+    startHeight = validationPanel.getBoundingClientRect().height;
+    validationResizer.setPointerCapture(event.pointerId);
+    app.querySelector<HTMLElement>('.shell')?.classList.add('resizing-validation');
+  });
+
+  validationResizer.addEventListener('pointermove', (event) => {
+    if (!validationResizer.hasPointerCapture(event.pointerId)) return;
+    setValidationHeight(workspace, validationPanel, validationResizer, apiLogResizer, apiLogPanel, startHeight + startY - event.clientY);
+  });
+
+  validationResizer.addEventListener('pointerup', (event) => finishValidationResize(app, validationResizer, event));
+  validationResizer.addEventListener('pointercancel', (event) => finishValidationResize(app, validationResizer, event));
+
+  validationResizer.addEventListener('keydown', (event) => {
+    const currentHeight = validationPanel.getBoundingClientRect().height;
+    const step = event.shiftKey ? 40 : 16;
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setValidationHeight(workspace, validationPanel, validationResizer, apiLogResizer, apiLogPanel, currentHeight + step);
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setValidationHeight(workspace, validationPanel, validationResizer, apiLogResizer, apiLogPanel, currentHeight - step);
+    }
+  });
+}
+
 function setPaneWidthFromPointer(workspace: HTMLElement, paneResizer: HTMLElement, clientX: number): void {
   const bounds = getPaneWidthBounds(workspace, paneResizer);
   setPaneWidth(workspace, paneResizer, clientX - bounds.left);
@@ -873,6 +976,33 @@ function getApiLogHeightBounds(workspace: HTMLElement, apiLogPanel: HTMLElement,
 function finishApiLogResize(app: HTMLElement, apiLogResizer: HTMLElement, event: PointerEvent): void {
   if (apiLogResizer.hasPointerCapture(event.pointerId)) apiLogResizer.releasePointerCapture(event.pointerId);
   app.querySelector<HTMLElement>('.shell')?.classList.remove('resizing-rows');
+}
+
+function setValidationHeight(workspace: HTMLElement, validationPanel: HTMLElement, validationResizer: HTMLElement, apiLogResizer: HTMLElement, apiLogPanel: HTMLElement, height: number, persist = true): void {
+  const bounds = getValidationHeightBounds(workspace, validationResizer, apiLogResizer, apiLogPanel);
+  const clampedHeight = Math.round(Math.min(Math.max(height, bounds.min), bounds.max));
+  validationPanel.style.setProperty('--validation-panel-height', `${clampedHeight}px`);
+  validationResizer.setAttribute('aria-valuemin', String(bounds.min));
+  validationResizer.setAttribute('aria-valuemax', String(bounds.max));
+  validationResizer.setAttribute('aria-valuenow', String(clampedHeight));
+  if (persist) localStorage.setItem('certgadgets.validationPanelHeight', String(clampedHeight));
+}
+
+function getValidationHeightBounds(workspace: HTMLElement, validationResizer: HTMLElement, apiLogResizer: HTMLElement, apiLogPanel: HTMLElement): { min: number; max: number } {
+  const workspaceRect = workspace.getBoundingClientRect();
+  const shellRect = workspace.parentElement?.getBoundingClientRect() ?? workspaceRect;
+  const validationResizerHeight = validationResizer.getBoundingClientRect().height || 6;
+  const apiLogResizerHeight = apiLogResizer.getBoundingClientRect().height || 6;
+  const apiLogHeight = apiLogPanel.getBoundingClientRect().height;
+  const min = 96;
+  const minWorkspaceHeight = 240;
+  const max = Math.max(min, shellRect.bottom - workspaceRect.top - validationResizerHeight - apiLogResizerHeight - apiLogHeight - minWorkspaceHeight);
+  return { min, max };
+}
+
+function finishValidationResize(app: HTMLElement, validationResizer: HTMLElement, event: PointerEvent): void {
+  if (validationResizer.hasPointerCapture(event.pointerId)) validationResizer.releasePointerCapture(event.pointerId);
+  app.querySelector<HTMLElement>('.shell')?.classList.remove('resizing-validation');
 }
 
 function applyRequestedTheme(themeOption?: AppTheme): void {
