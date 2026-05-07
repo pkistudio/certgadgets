@@ -3,13 +3,19 @@ import { Certificate, type Extension, type GeneralName, type RelativeDistinguish
 
 export type CertificateNodeKind =
   | 'certificate'
+  | 'version'
+  | 'serial-number'
+  | 'signature-algorithm'
   | 'subject'
   | 'issuer'
   | 'validity'
   | 'public-key'
+  | 'issuer-unique-id'
+  | 'subject-unique-id'
   | 'extensions'
   | 'extension'
   | 'signature'
+  | 'signature-value'
   | 'validation'
   | 'network-resource';
 
@@ -81,12 +87,15 @@ export function createDemoCertificate(): CertificateDocument {
     label: 'www.example.test',
     size: DEMO_CERTIFICATE_DER.byteLength,
     derBytes: DEMO_CERTIFICATE_DER,
+    version: 'v3 (2)',
     subject: 'CN=www.example.test, O=PKI Studio, C=JP',
     issuer: 'CN=PKI Studio Demo Issuing CA, O=PKI Studio, C=JP',
     serialNumber: '42:15:66:90:90:21',
     validity: '2026-01-01 to 2027-01-01',
     publicKey: 'RSA 2048',
-    signature: 'sha256WithRSAEncryption'
+    signatureAlgorithm: 'sha256WithRSAEncryption',
+    certificateSignatureAlgorithm: 'sha256WithRSAEncryption',
+    certificateSignature: 'sha256WithRSAEncryption signature value'
   });
 }
 
@@ -104,17 +113,27 @@ export function createCertificateFromBytes(bytes: Uint8Array, sourceName: string
     label,
     size: certificateBytes.byteLength,
     derBytes: certificateBytes,
+    version: formatCertificateVersion(certificate.version),
     subject,
     issuer,
     serialNumber: formatSerialNumber(certificate.serialNumber.valueBlock.valueHexView),
     validity: `${formatDate(certificate.notBefore.value)} to ${formatDate(certificate.notAfter.value)}`,
     publicKey: formatAlgorithm(certificate.subjectPublicKeyInfo.algorithm.algorithmId),
-    signature: formatAlgorithm(certificate.signatureAlgorithm.algorithmId),
+    signatureAlgorithm: formatAlgorithm(certificate.signature.algorithmId),
+    certificateSignatureAlgorithm: formatAlgorithm(certificate.signatureAlgorithm.algorithmId),
+    certificateSignature: `${formatAlgorithm(certificate.signatureAlgorithm.algorithmId)} (${certificate.signatureValue.valueBlock.valueHexView.byteLength} bytes)`,
+    versionDer: createVersionDer(certificate.version),
+    serialNumberDer: toBytes(certificate.serialNumber.toBER(false)),
+    signatureAlgorithmDer: toBytes(certificate.signature.toSchema().toBER(false)),
     subjectDer: toBytes(certificate.subject.toSchema().toBER(false)),
     issuerDer: toBytes(certificate.issuer.toSchema().toBER(false)),
     validityDer: createValidityDer(certificate),
     publicKeyDer: toBytes(certificate.subjectPublicKeyInfo.toSchema().toBER(false)),
-    signatureDer: toBytes(certificate.signatureAlgorithm.toSchema().toBER(false)),
+    issuerUniqueIdDer: certificate.issuerUniqueID ? createImplicitBitStringDer(1, certificate.issuerUniqueID) : undefined,
+    subjectUniqueIdDer: certificate.subjectUniqueID ? createImplicitBitStringDer(2, certificate.subjectUniqueID) : undefined,
+    extensionsDer: createExtensionsDer(extensions),
+    certificateSignatureAlgorithmDer: toBytes(certificate.signatureAlgorithm.toSchema().toBER(false)),
+    certificateSignatureDer: toBytes(certificate.signatureValue.toBER(false)),
     extensions: extensions.map((extension) => createExtensionInput(extension))
   });
 }
@@ -149,17 +168,27 @@ function buildCertificateDocument(input: {
   label: string;
   size: number;
   derBytes: Uint8Array;
+  version: string;
   subject: string;
   issuer: string;
   serialNumber: string;
   validity: string;
   publicKey: string;
-  signature: string;
+  signatureAlgorithm: string;
+  certificateSignatureAlgorithm: string;
+  certificateSignature: string;
+  versionDer?: Uint8Array;
+  serialNumberDer?: Uint8Array;
+  signatureAlgorithmDer?: Uint8Array;
   subjectDer?: Uint8Array;
   issuerDer?: Uint8Array;
   validityDer?: Uint8Array;
   publicKeyDer?: Uint8Array;
-  signatureDer?: Uint8Array;
+  issuerUniqueIdDer?: Uint8Array;
+  subjectUniqueIdDer?: Uint8Array;
+  extensionsDer?: Uint8Array;
+  certificateSignatureAlgorithmDer?: Uint8Array;
+  certificateSignatureDer?: Uint8Array;
   extensions?: ExtensionInput[];
 }): CertificateDocument {
   const rootId = `${input.id}:certificate`;
@@ -174,30 +203,40 @@ function buildCertificateDocument(input: {
     derBytes: input.derBytes,
     details: [
       { label: 'Source', value: input.sourceName },
-      { label: 'Subject', value: input.subject },
-      { label: 'Issuer', value: input.issuer },
+      { label: 'Version', value: input.version },
       { label: 'Serial number', value: input.serialNumber },
+      { label: 'Signature algorithm', value: input.signatureAlgorithm },
+      { label: 'Issuer', value: input.issuer },
       { label: 'Validity', value: input.validity },
+      { label: 'Subject', value: input.subject },
       { label: 'Public key', value: input.publicKey },
-      { label: 'Signature', value: input.signature }
+      { label: 'Certificate signature algorithm', value: input.certificateSignatureAlgorithm },
+      { label: 'Certificate signature', value: input.certificateSignature }
     ],
     children: [
-      createLeaf(rootId, 'subject', 'Subject', input.subject, input.subjectDer ?? mockBytes('subject')),
+      createLeaf(rootId, 'version', 'Version', input.version, input.versionDer ?? mockBytes('version')),
+      createLeaf(rootId, 'serial-number', 'Serial Number', input.serialNumber, input.serialNumberDer ?? mockBytes('serial-number')),
+      createLeaf(rootId, 'signature-algorithm', 'Signature Algorithm', input.signatureAlgorithm, input.signatureAlgorithmDer ?? mockBytes('signature-algorithm')),
       createLeaf(rootId, 'issuer', 'Issuer', input.issuer, input.issuerDer ?? mockBytes('issuer')),
       createLeaf(rootId, 'validity', 'Validity', input.validity, input.validityDer ?? mockBytes('validity')),
-      createLeaf(rootId, 'public-key', 'Public Key', input.publicKey, input.publicKeyDer ?? mockBytes('public-key')),
+      createLeaf(rootId, 'subject', 'Subject', input.subject, input.subjectDer ?? mockBytes('subject')),
+      createLeaf(rootId, 'public-key', 'Subject Public Key Info', input.publicKey, input.publicKeyDer ?? mockBytes('public-key')),
+      ...(input.issuerUniqueIdDer ? [createLeaf(rootId, 'issuer-unique-id', 'Issuer Unique ID', `${input.issuerUniqueIdDer.byteLength} bytes`, input.issuerUniqueIdDer)] : []),
+      ...(input.subjectUniqueIdDer ? [createLeaf(rootId, 'subject-unique-id', 'Subject Unique ID', `${input.subjectUniqueIdDer.byteLength} bytes`, input.subjectUniqueIdDer)] : []),
       {
         id: `${rootId}:extensions`,
         kind: 'extensions',
         label: 'Extensions',
         note: `${extensionInputs.length} item${extensionInputs.length === 1 ? '' : 's'}`,
         view: 'summary',
+        derBytes: input.extensionsDer,
         details: extensionInputs.length > 0
           ? extensionInputs.map((extension) => ({ label: extension.label, value: extension.summary }))
           : [{ label: 'Extensions', value: 'No X.509 v3 extensions were found.' }],
         children: extensionInputs.map((extension) => createExtension(rootId, extension))
       },
-      createLeaf(rootId, 'signature', 'Signature', input.signature, input.signatureDer ?? mockBytes('signature')),
+      createLeaf(rootId, 'signature', 'Certificate Signature Algorithm', input.certificateSignatureAlgorithm, input.certificateSignatureAlgorithmDer ?? mockBytes('certificate-signature-algorithm')),
+      createLeaf(rootId, 'signature-value', 'Certificate Signature Value', input.certificateSignature, input.certificateSignatureDer ?? mockBytes('certificate-signature-value')),
       {
         id: `${rootId}:validation`,
         kind: 'validation',
@@ -243,7 +282,7 @@ function createLeaf(parentId: string, kind: CertificateNodeKind, label: string, 
     kind,
     label,
     note: value,
-    view: kind === 'validity' ? 'summary' : 'der',
+    view: 'der',
     derBytes,
     details: [{ label, value }]
   };
@@ -347,6 +386,32 @@ function normalizeCertificateBytes(bytes: Uint8Array): Uint8Array {
 
 function createValidityDer(certificate: Certificate): Uint8Array {
   return toBytes(new asn1js.Sequence({ value: [certificate.notBefore.toSchema(), certificate.notAfter.toSchema()] }).toBER(false));
+}
+
+function createVersionDer(version: number): Uint8Array {
+  return toBytes(new asn1js.Constructed({
+    idBlock: { tagClass: 3, tagNumber: 0 },
+    value: [new asn1js.Integer({ value: version })]
+  }).toBER(false));
+}
+
+function createImplicitBitStringDer(tagNumber: number, valueHex: ArrayBuffer): Uint8Array {
+  return toBytes(new asn1js.Primitive({
+    idBlock: { tagClass: 3, tagNumber },
+    valueHex
+  }).toBER(false));
+}
+
+function createExtensionsDer(extensions: Extension[]): Uint8Array | undefined {
+  if (extensions.length === 0) return undefined;
+  return toBytes(new asn1js.Constructed({
+    idBlock: { tagClass: 3, tagNumber: 3 },
+    value: [new asn1js.Sequence({ value: extensions.map((extension) => extension.toSchema()) })]
+  }).toBER(false));
+}
+
+function formatCertificateVersion(version: number): string {
+  return `v${version + 1} (${version})`;
 }
 
 function formatRdn(rdn: RelativeDistinguishedNames): string {

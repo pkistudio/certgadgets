@@ -402,13 +402,20 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
       return;
     }
 
-    if (node.view === 'der') showDerViewer(node);
-    else {
-      showDetailContent();
-      if (node.view === 'summary') renderSummaryDetail(detailContent, node);
-      else if (node.view === 'extension') renderExtensionDetail(detailContent, node);
-      else if (node.view === 'validation') renderValidationDetail(detailContent, node);
-      else if (node.view === 'network') renderNetworkDetail(detailContent, node);
+    if (node.view === 'der') {
+      showDerViewer(node);
+      return;
+    }
+
+    showDetailContent();
+    if (node.view === 'summary') renderSummaryDetail(detailContent, node);
+    else if (node.view === 'extension') renderExtensionDetail(detailContent, node);
+    else if (node.view === 'validation') renderValidationDetail(detailContent, node);
+    else if (node.view === 'network') renderNetworkDetail(detailContent, node);
+    else if (node.derBytes) {
+      showDerViewer(node);
+    } else {
+      renderSummaryDetail(detailContent, node);
     }
   }
 
@@ -501,11 +508,17 @@ function getTreeIconClass(node: CertificateTreeNode, depth: number, hasChildren:
 }
 
 function isAttributeNode(node: CertificateTreeNode): boolean {
-  return node.kind === 'subject' ||
+  return node.kind === 'version' ||
+    node.kind === 'serial-number' ||
+    node.kind === 'signature-algorithm' ||
+    node.kind === 'subject' ||
     node.kind === 'issuer' ||
     node.kind === 'validity' ||
     node.kind === 'public-key' ||
+    node.kind === 'issuer-unique-id' ||
+    node.kind === 'subject-unique-id' ||
     node.kind === 'signature' ||
+    node.kind === 'signature-value' ||
     node.kind === 'extension';
 }
 
@@ -763,7 +776,8 @@ function setupPaneResizer(workspace: HTMLElement, paneResizer: HTMLElement): voi
 }
 
 function setupApiLogResizer(app: HTMLElement, workspace: HTMLElement, apiLogPanel: HTMLElement, apiLogList: HTMLElement, apiLogResizer: HTMLElement): void {
-  setApiLogHeight(workspace, apiLogPanel, apiLogList, apiLogResizer, 140, false);
+  const storedHeight = Number.parseInt(localStorage.getItem('certgadgets.apiLogListHeight') ?? '', 10);
+  setApiLogHeight(workspace, apiLogPanel, apiLogList, apiLogResizer, Number.isFinite(storedHeight) ? storedHeight : 140, false);
 
   apiLogResizer.addEventListener('pointerdown', (event) => {
     if (isSingleColumnLayout()) return;
@@ -780,6 +794,18 @@ function setupApiLogResizer(app: HTMLElement, workspace: HTMLElement, apiLogPane
 
   apiLogResizer.addEventListener('pointerup', (event) => finishApiLogResize(app, apiLogResizer, event));
   apiLogResizer.addEventListener('pointercancel', (event) => finishApiLogResize(app, apiLogResizer, event));
+
+  apiLogResizer.addEventListener('keydown', (event) => {
+    const currentHeight = apiLogList.getBoundingClientRect().height;
+    const step = event.shiftKey ? 40 : 16;
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setApiLogHeight(workspace, apiLogPanel, apiLogList, apiLogResizer, currentHeight + step);
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setApiLogHeight(workspace, apiLogPanel, apiLogList, apiLogResizer, currentHeight - step);
+    }
+  });
 }
 
 function setPaneWidthFromPointer(workspace: HTMLElement, paneResizer: HTMLElement, clientX: number): void {
@@ -835,12 +861,13 @@ function setApiLogHeight(workspace: HTMLElement, apiLogPanel: HTMLElement, apiLo
 
 function getApiLogHeightBounds(workspace: HTMLElement, apiLogPanel: HTMLElement, apiLogResizer: HTMLElement): { bottom: number; min: number; max: number; resizerHeight: number; headerHeight: number } {
   const workspaceRect = workspace.getBoundingClientRect();
-  const panelRect = apiLogPanel.getBoundingClientRect();
+  const shellRect = workspace.parentElement?.getBoundingClientRect() ?? apiLogPanel.getBoundingClientRect();
   const headerHeight = apiLogPanel.querySelector<HTMLElement>('.api-log-header')?.getBoundingClientRect().height ?? 28;
   const resizerHeight = apiLogResizer.getBoundingClientRect().height || 6;
   const min = 64;
-  const max = Math.max(min, panelRect.bottom - workspaceRect.bottom - resizerHeight - headerHeight - 24);
-  return { bottom: panelRect.bottom, min, max, resizerHeight, headerHeight };
+  const minWorkspaceHeight = 240;
+  const max = Math.max(min, shellRect.bottom - workspaceRect.top - resizerHeight - headerHeight - minWorkspaceHeight);
+  return { bottom: shellRect.bottom, min, max, resizerHeight, headerHeight };
 }
 
 function finishApiLogResize(app: HTMLElement, apiLogResizer: HTMLElement, event: PointerEvent): void {
