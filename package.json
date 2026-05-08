@@ -1,6 +1,6 @@
 {
   "name": "@pkistudio/certgadgets",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Browser certificate investigation tools and reusable Certificate Gadgets API.",
   "type": "module",
   "main": "./dist/core.js",
@@ -30,6 +30,9 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": [
     "*.css"
   ],

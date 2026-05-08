@@ -5,7 +5,7 @@ certificates. It keeps the loaded certificate in a PkiStudioJS-style tree on the
 left, shows certificate-focused details on the right, and sends the selected DER
 object to the embedded PkiStudioJS ASN.1 viewer.
 
-Current version: 0.0.0
+Current version: 0.1.0
 
 ## Features
 
