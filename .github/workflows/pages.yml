@@ -34,6 +34,8 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          VITE_CERTGADGETS_FETCH_PROXY_URL: ${{ vars.VITE_CERTGADGETS_FETCH_PROXY_URL }}
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

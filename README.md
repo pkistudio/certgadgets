@@ -5,7 +5,15 @@ certificates. It keeps the loaded certificate in a PkiStudioJS-style tree on the
 left, shows certificate-focused details on the right, and sends the selected DER
 object to the embedded PkiStudioJS ASN.1 viewer.
 
-Current version: 0.1.0
+> **Important for browser validation:** Browser applications that use
+> `@pkistudio/certgadgets` and want to offer network-assisted validation should
+> provide their own fetch proxy or host networking implementation. Certificate
+> AIA, OCSP, and CRL endpoints often use HTTP or omit CORS headers, so direct
+> browser fetches may fail. See
+> [GitHub Pages network validation](#github-pages-network-validation) for an
+> example proxy setup.
+
+Current version: 0.1.1
 
 ## Features
 
@@ -62,6 +70,8 @@ Current version: 0.1.0
 ### Network-Assisted Validation
 
 - Performs certificate parsing and structural inspection locally by default.
+- Requires a host-provided networking path, such as a fetch proxy, for reliable
+  browser-based AIA, OCSP, and CRL requests from static HTTPS deployments.
 - Does not silently fetch CRLs, OCSP responses, AIA resources, or issuer
   certificates.
 - Shows explicit action buttons for detected network targets such as OCSP, AIA
@@ -238,6 +248,98 @@ The development server includes a localhost-only fetch proxy for explicit
 network validation requests that would otherwise be blocked by browser CORS
 rules.
 
+### GitHub Pages network validation
+
+GitHub Pages serves Certificate Gadgets as a static HTTPS site. Browser security
+rules block many certificate validation URLs directly because certificates often
+publish AIA, OCSP, and CRL resources over `http://`, and many responders do not
+allow the Pages origin with CORS. To make Validation work for Pages users, deploy
+an HTTPS fetch proxy and pass its URL to the Pages build.
+
+One simple option is Cloudflare Workers. Create a Worker such as
+`certgadgets-fetch`, deploy the script below, and use its `/fetch` URL as
+`VITE_CERTGADGETS_FETCH_PROXY_URL`.
+
+```js
+const ALLOWED_ORIGIN = 'https://pkistudio.github.io';
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+export default {
+  async fetch(request) {
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, X-CertGadgets-Target-Method, X-CertGadgets-Target-Content-Type, X-CertGadgets-Target-Accept',
+      'Access-Control-Expose-Headers': 'Content-Type, X-CertGadgets-Proxied'
+    };
+
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
+
+    const requestUrl = new URL(request.url);
+    if (requestUrl.pathname !== '/fetch') return new Response('Not found', { status: 404, headers: corsHeaders });
+
+    const target = requestUrl.searchParams.get('url');
+    if (!target || !/^https?:\/\//i.test(target)) return new Response('Missing or unsupported target URL.', { status: 400, headers: corsHeaders });
+
+    const targetUrl = new URL(target);
+    if (isPrivateHost(targetUrl.hostname)) return new Response('Target host is not allowed.', { status: 403, headers: corsHeaders });
+
+    const targetMethod = request.headers.get('X-CertGadgets-Target-Method') || (request.method === 'POST' ? 'POST' : 'GET');
+    const targetHeaders = new Headers();
+    const contentType = request.headers.get('X-CertGadgets-Target-Content-Type');
+    const accept = request.headers.get('X-CertGadgets-Target-Accept');
+    if (contentType) targetHeaders.set('Content-Type', contentType);
+    if (accept) targetHeaders.set('Accept', accept);
+
+    let body;
+    if (request.method === 'POST') {
+      const bytes = await request.arrayBuffer();
+      if (bytes.byteLength > MAX_BODY_BYTES) return new Response('Request body too large.', { status: 413, headers: corsHeaders });
+      body = bytes;
+    }
+
+    try {
+      const targetResponse = await fetch(targetUrl, { method: targetMethod, headers: targetHeaders, body });
+      const responseHeaders = new Headers(corsHeaders);
+      responseHeaders.set('Content-Type', targetResponse.headers.get('Content-Type') || 'application/octet-stream');
+      responseHeaders.set('X-CertGadgets-Proxied', '1');
+      return new Response(targetResponse.body, { status: targetResponse.status, headers: responseHeaders });
+    } catch (error) {
+      return new Response(error instanceof Error ? error.message : String(error), {
+        status: 502,
+        headers: { ...corsHeaders, 'Content-Type': 'text/plain; charset=utf-8' }
+      });
+    }
+  }
+};
+
+function isPrivateHost(hostname) {
+  const host = hostname.toLowerCase();
+  return host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+    /^169\.254\./.test(host);
+}
+```
+
+Then configure this repository so the Pages workflow includes the proxy URL in
+the Vite build:
+
+1. Open the GitHub repository settings.
+2. Go to `Secrets and variables` -> `Actions` -> `Variables`.
+3. Create a repository variable named `VITE_CERTGADGETS_FETCH_PROXY_URL`.
+4. Set its value to the Worker endpoint, for example
+   `https://certgadgets-fetch.example.workers.dev/fetch`.
+5. Re-run the `Deploy GitHub Pages` workflow or push to `main`.
+
+When this variable is set, the Pages build fetches certificate validation
+resources through the configured proxy after direct browser fetch fails. Local
+development without the variable continues to use the Vite dev proxy on
+`localhost`.
+
 Use the checked-in debug certificate when inspecting the UI manually:
 
 ```text
@@ -267,6 +369,14 @@ Install the package in a browser or Webview project:
 ```sh
 npm install @pkistudio/certgadgets
 ```
+
+> **Browser networking note:** If your application imports
+> `@pkistudio/certgadgets` in the browser and enables network-assisted
+> validation, provide a fetch proxy or host networking implementation for AIA,
+> OCSP, and CRL requests. Many certificate endpoints are HTTP-only or do not send
+> CORS headers for arbitrary browser origins, so direct `fetch()` may fail. The
+> [GitHub Pages network validation](#github-pages-network-validation) section
+> shows a concrete proxy configuration.
 
 Use the UI-independent API:
 

@@ -500,7 +500,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     try {
       return await fetchNetworkResourceDirect(plan, plan.url);
     } catch (error) {
-      const proxyUrl = getDevFetchProxyUrl(plan.url);
+      const proxyUrl = getFetchProxyUrl(plan.url);
       if (!proxyUrl) throw error;
       return fetchNetworkResourceDirect(plan, proxyUrl, true);
     }
@@ -1158,8 +1158,16 @@ function createSafeFileBase(value: string): string {
   return value.toLowerCase().replace(/\.[a-z0-9]+$/i, '').replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-function getDevFetchProxyUrl(targetUrl: string): string | null {
+function getFetchProxyUrl(targetUrl: string): string | null {
   if (!/^https?:\/\//i.test(targetUrl)) return null;
+
+  const configuredProxyUrl = import.meta.env.VITE_CERTGADGETS_FETCH_PROXY_URL?.trim();
+  if (configuredProxyUrl) {
+    const proxyUrl = new URL(configuredProxyUrl);
+    proxyUrl.searchParams.set('url', targetUrl);
+    return proxyUrl.toString();
+  }
+
   if (!/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(window.location.hostname)) return null;
   const proxyUrl = new URL('/__certgadgets_fetch', window.location.href);
   proxyUrl.searchParams.set('url', targetUrl);
