@@ -4,12 +4,15 @@ import { Certificate, OCSPRequest, OCSPResponse } from 'pkijs';
 import PkiStudio, { type PkiStudioViewerInstance } from 'pkistudiojs/viewer';
 import {
   CertGadgetsCore,
+  type CertificateNetworkResource,
   type CertificateDocument,
   type CertificateTreeNode,
   type NetworkValidationPlan
 } from './core';
 
 const PKISTUDIO_OIDS_URL = new URL('../node_modules/pkistudiojs/app/static/oids.json', import.meta.url).href;
+const TREE_ITEM_TRUNCATE_THRESHOLD = 255;
+const TREE_ITEM_TEXT_LIMIT = 250;
 
 declare global {
   interface Window {
@@ -81,7 +84,6 @@ export type InitCertificateGadgetsOptions = {
 export type CertificateGadgetsAppInstance = {
   readonly certificates: readonly CertificateDocument[];
   readonly selectedNode: CertificateTreeNode | null;
-  loadDemoCertificate: () => void;
   loadCertificateBytes: (bytes: Uint8Array, sourceName?: string) => void;
   close: () => void;
 };
@@ -103,7 +105,6 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
       <section class="workspace">
         <section class="panel certificate-panel" aria-label="Certificates">
           <nav class="certificate-menu" aria-label="Certificate actions">
-            <button id="loadDemoButton" type="button">Demo</button>
             <div class="menu-group">
               <button id="toggleLoadMenuButton" type="button" aria-haspopup="menu" aria-expanded="false">Load</button>
               <div id="loadMenu" class="submenu" role="menu" hidden>
@@ -124,7 +125,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
           </nav>
           <section class="certificate-card">
             <div id="certificateTree" class="tree empty">No certificate loaded yet.</div>
-            <p id="formNotice" class="notice">Load a certificate or use the demo to inspect the planned UI flow.</p>
+            <p id="formNotice" class="notice">Load a certificate to inspect its attributes, extensions, DER data, and validation resources.</p>
           </section>
         </section>
         <div id="paneResizer" class="pane-resizer" role="separator" aria-label="Resize panes" aria-orientation="vertical" tabindex="0"></div>
@@ -177,7 +178,6 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   const aboutButton = query<HTMLButtonElement>(app, '#aboutButton');
   const aboutDialog = query<HTMLDialogElement>(app, '#aboutDialog');
   const closeAboutButton = query<HTMLButtonElement>(app, '#closeAboutButton');
-  const loadDemoButton = query<HTMLButtonElement>(app, '#loadDemoButton');
   const toggleLoadMenuButton = query<HTMLButtonElement>(app, '#toggleLoadMenuButton');
   const toggleSaveMenuButton = query<HTMLButtonElement>(app, '#toggleSaveMenuButton');
   const loadMenu = query<HTMLDivElement>(app, '#loadMenu');
@@ -239,8 +239,6 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   clearValidationResultsButton.addEventListener('click', () => {
     clearValidationResults();
   });
-
-  loadDemoButton.addEventListener('click', () => loadCertificate(CertGadgetsCore.createDemoCertificate(), 'Demo certificate loaded.'));
 
   toggleLoadMenuButton.addEventListener('click', () => toggleTopMenu(loadMenu, toggleLoadMenuButton, saveMenu, toggleSaveMenuButton));
   toggleSaveMenuButton.addEventListener('click', () => toggleTopMenu(saveMenu, toggleSaveMenuButton, loadMenu, toggleLoadMenuButton));
@@ -307,8 +305,11 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
     if (button.dataset.action !== 'run-network-validation') return;
     const node = selectedNodeId ? findNode(selectedNodeId) : null;
-    if (!node?.networkUrl) return;
-    await runNetworkValidationPlan(createNetworkValidationPlan(node), getSelectedCertificate());
+    if (!node) return;
+    const planIndex = Number(button.dataset.networkResourceIndex ?? '0');
+    const plan = createNetworkValidationPlans(node)[Number.isInteger(planIndex) ? planIndex : 0];
+    if (!plan) return;
+    await runNetworkValidationPlan(plan, getSelectedCertificate());
   });
 
   document.addEventListener('click', (event) => {
@@ -792,9 +793,6 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
     get selectedNode() {
       return selectedNodeId ? findNode(selectedNodeId) : null;
     },
-    loadDemoCertificate() {
-      loadCertificate(CertGadgetsCore.createDemoCertificate(), 'Demo certificate loaded.');
-    },
     loadCertificateBytes,
     close() {
       viewer?.close();
@@ -807,15 +805,17 @@ function renderTreeNode(node: CertificateTreeNode, depth: number, selectedNodeId
   const selected = node.id === selectedNodeId;
   const hasChildren = Boolean(node.children?.length);
   const iconClass = getTreeIconClass(node, depth, hasChildren);
-  const note = node.note ? ` <span class="tree-note">${escapeHtml(node.note)}</span>` : '';
+  const fullItemText = getTreeItemText(node);
+  const itemText = truncateTreeItemText(fullItemText);
+  const ariaLabel = getTreeItemAriaLabel(node, fullItemText);
   const children = hasChildren ? `<div class="tree-children">${node.children!.map((child) => renderTreeNode(child, depth + 1, selectedNodeId)).join('')}</div>` : '';
   return `
     <details class="tree-node${hasChildren ? '' : ' tree-leaf'}" open>
       <summary class="tree-row${selected ? ' selected' : ''}">
         <span class="tree-toggle" aria-hidden="true">${hasChildren ? '-' : ''}</span>
         <span class="tree-icon ${iconClass}" aria-hidden="true"></span>
-        <button class="tree-item" type="button" data-node-id="${escapeHtml(node.id)}" aria-pressed="${selected}">
-          <span class="tree-tag">${escapeHtml(node.label)}${note}</span>
+        <button class="tree-item" type="button" data-node-id="${escapeHtml(node.id)}" aria-pressed="${selected}" aria-label="${escapeHtml(ariaLabel)}">
+          <span class="tree-tag">${escapeHtml(itemText)}</span>
         </button>
       </summary>
       ${children}
@@ -823,10 +823,73 @@ function renderTreeNode(node: CertificateTreeNode, depth: number, selectedNodeId
   `;
 }
 
+function getTreeItemText(node: CertificateTreeNode): string {
+  if (shouldShowValueOnlyInTree(node)) return getTreeItemValue(node);
+  return node.note ? `${node.label} ${node.note}` : node.label;
+}
+
+function shouldShowValueOnlyInTree(node: CertificateTreeNode): boolean {
+  return node.kind === 'version' ||
+    node.kind === 'serial-number' ||
+    node.kind === 'signature-algorithm' ||
+    node.kind === 'issuer' ||
+    node.kind === 'validity' ||
+    node.kind === 'subject' ||
+    node.kind === 'public-key' ||
+    node.kind === 'issuer-unique-id' ||
+    node.kind === 'subject-unique-id' ||
+    node.kind === 'extension' ||
+    node.kind === 'signature' ||
+    node.kind === 'signature-value' ||
+    node.kind === 'network-resource';
+}
+
+function getTreeItemValue(node: CertificateTreeNode): string {
+  if (node.kind === 'signature-value') return '<Signature Value>';
+  if (node.treeValue) return node.treeValue;
+  const detailValue = node.details?.find((detail) => detail.label === 'Value')?.value ??
+    node.details?.find((detail) => detail.label === 'Decoded values')?.value ??
+    node.details?.find((detail) => detail.label === 'Network resources')?.value;
+  return detailValue ?? node.note ?? node.label;
+}
+
+function truncateTreeItemText(value: string): string {
+  return value.length >= TREE_ITEM_TRUNCATE_THRESHOLD ? `${value.slice(0, TREE_ITEM_TEXT_LIMIT)}...` : value;
+}
+
+function getTreeItemAriaLabel(node: CertificateTreeNode, itemText: string): string {
+  return node.label === itemText ? itemText : `${node.label} ${itemText}`;
+}
+
 function getTreeIconClass(node: CertificateTreeNode, depth: number, hasChildren: boolean): string {
   if (node.kind === 'certificate') return 'certificate';
+  if (node.kind === 'version') return 'text-badge version';
+  if (node.kind === 'serial-number') return 'text-badge serial-number';
+  if (node.kind === 'signature-algorithm' || node.kind === 'signature') return 'text-badge algorithm';
+  if (node.kind === 'issuer') return 'text-badge issuer';
+  if (node.kind === 'subject') return 'text-badge subject';
+  if (node.kind === 'validity') return 'text-badge validity';
+  if (node.kind === 'public-key') return 'text-badge public-key';
+  if (node.kind === 'signature-value') return 'text-badge signature-value';
+  if (node.kind === 'extension') return `text-badge ${getExtensionTreeIconClass(node)}`;
   if (isAttributeNode(node)) return 'attribute';
   return depth === 0 || hasChildren ? 'folder' : 'leaf';
+}
+
+function getExtensionTreeIconClass(node: CertificateTreeNode): string {
+  const oid = node.details?.find((detail) => detail.label === 'OID')?.value;
+  const name = node.label.toLowerCase();
+  if (oid === '2.5.29.19' || name === 'basic constraints') return 'extension-basic-constraints';
+  if (oid === '2.5.29.15' || name === 'key usage') return 'extension-key-usage';
+  if (oid === '2.5.29.37' || name === 'extended key usage') return 'extension-extended-key-usage';
+  if (oid === '2.5.29.17' || name === 'subject alternative name') return 'extension-subject-alt-name';
+  if (oid === '2.5.29.18' || name === 'issuer alternative name') return 'extension-issuer-alt-name';
+  if (oid === '2.5.29.31' || name === 'crl distribution points') return 'extension-crl-distribution';
+  if (oid === '2.5.29.32' || name === 'certificate policies') return 'extension-certificate-policies';
+  if (oid === '1.3.6.1.5.5.7.1.1' || name === 'authority information access') return 'extension-authority-info-access';
+  if (oid === '2.5.29.14' || name === 'subject key identifier') return 'extension-subject-key-identifier';
+  if (oid === '2.5.29.35' || name === 'authority key identifier') return 'extension-authority-key-identifier';
+  return 'extension-generic';
 }
 
 function isAttributeNode(node: CertificateTreeNode): boolean {
@@ -857,12 +920,31 @@ function renderSummaryDetail(detailPane: HTMLElement, node: CertificateTreeNode)
   detailPane.innerHTML = `
     <section class="detail-surface" data-certgadgets-selected-node="${escapeHtml(node.id)}">
       <header class="detail-header">
-        <p class="detail-kicker">${escapeHtml(node.kind)}</p>
+        <p class="detail-kicker">${escapeHtml(getDetailKicker(node))}</p>
         <h1>${escapeHtml(node.label)}</h1>
       </header>
       ${renderDetailList(node)}
     </section>
   `;
+}
+
+function getDetailKicker(node: CertificateTreeNode): string {
+  if (node.kind === 'signature') return 'SIGNING ALGORITHM';
+  if (node.kind === 'signature-value') return 'SIGNATURE';
+  return isTbsCertificateElementNode(node) ? 'TBSCERTIFICATE ELEMENT' : node.kind;
+}
+
+function isTbsCertificateElementNode(node: CertificateTreeNode): boolean {
+  return node.kind === 'version' ||
+    node.kind === 'serial-number' ||
+    node.kind === 'signature-algorithm' ||
+    node.kind === 'issuer' ||
+    node.kind === 'validity' ||
+    node.kind === 'subject' ||
+    node.kind === 'public-key' ||
+    node.kind === 'issuer-unique-id' ||
+    node.kind === 'subject-unique-id' ||
+    node.kind === 'extensions';
 }
 
 function renderExtensionDetail(detailPane: HTMLElement, node: CertificateTreeNode): void {
@@ -878,28 +960,53 @@ function renderExtensionDetail(detailPane: HTMLElement, node: CertificateTreeNod
 }
 
 function renderNetworkDetail(detailPane: HTMLElement, node: CertificateTreeNode): void {
-  const plan = node.networkUrl ? createNetworkValidationPlan(node) : null;
+  const plans = createNetworkValidationPlans(node);
+  const singlePlan = plans.length === 1 ? plans[0] : null;
   detailPane.innerHTML = `
     <section class="detail-surface" data-certgadgets-selected-node="${escapeHtml(node.id)}">
-      <header class="detail-header detail-header-with-action">
-        <div>
-          <p class="detail-kicker">network-assisted validation</p>
-          <h1>${escapeHtml(node.label)}</h1>
-        </div>
-        ${plan ? '<button type="button" data-action="run-network-validation">Run</button>' : ''}
+      <header class="detail-header">
+        <p class="detail-kicker">network-assisted validation</p>
+        <h1>${escapeHtml(node.label)}</h1>
       </header>
       ${renderDetailList(node)}
-      <div class="network-target">
-        <span>Target</span>
-        <code>${escapeHtml(node.networkUrl ?? '(none)')}</code>
-      </div>
-      ${plan ? `
+      ${renderNetworkTargets(plans)}
+      ${singlePlan ? `
         <section class="network-action">
-          <p>${escapeHtml(getNetworkValidationDescription(plan))}</p>
+          <p>${escapeHtml(getNetworkValidationDescription(singlePlan))}</p>
         </section>
-      ` : '<p class="detail-note">No network validation target is available for this item.</p>'}
+      ` : plans.length === 0 ? '<p class="detail-note">No network validation target is available for this item.</p>' : ''}
     </section>
   `;
+}
+
+function renderNetworkTargets(plans: NetworkValidationPlan[]): string {
+  if (plans.length === 0) return '';
+  return `
+    <section class="network-targets">
+      ${plans.map((plan, index) => `
+        <article class="network-target">
+          <div class="network-target-main">
+            <span>${escapeHtml(getValidationTargetLabel(plan))}</span>
+            <code>${escapeHtml(plan.url)}</code>
+          </div>
+          <dl class="network-target-meta">
+            <div><dt>Operation</dt><dd>${escapeHtml(plan.operation)}</dd></div>
+            <div><dt>Reason</dt><dd>${escapeHtml(plan.reason)}</dd></div>
+          </dl>
+          <button class="network-target-action" type="button" data-action="run-network-validation" data-network-resource-index="${index}">${escapeHtml(getNetworkTargetActionLabel(plan))}</button>
+        </article>
+      `).join('')}
+    </section>
+  `;
+}
+
+function getNetworkTargetActionLabel(plan: NetworkValidationPlan): string {
+  const target = getValidationTargetLabel(plan);
+  if (target === 'CDP') return 'Fetch CRL';
+  if (target === 'OCSP') return 'Query OCSP';
+  if (target === 'AIA CA Issuers') return 'Fetch issuer certificate';
+  if (target === 'AIA') return 'Fetch AIA resource';
+  return target;
 }
 
 function renderValidationResultDetail(detailPane: HTMLElement, result: ValidationResultEntry): void {
@@ -1266,21 +1373,37 @@ function findNodeInTree(node: CertificateTreeNode, nodeId: string): CertificateT
 }
 
 function getValidationTargetLabel(plan: NetworkValidationPlan): string {
-  const source = `${plan.reason} ${plan.operation} ${plan.url}`;
+  const reason = plan.reason;
+  const source = `${reason} ${plan.operation} ${plan.url}`;
   if (/ocsp/i.test(source)) return 'OCSP';
-  if (/crl|\.crl(?:$|[?#])/i.test(source)) return 'CDP';
+  if (/ca issuers|issuer certificate|fetch issuer|issuer/i.test(reason)) return 'AIA CA Issuers';
   if (/issuer|ca issuers|\.cer(?:$|[?#])/i.test(source)) return 'AIA CA Issuers';
+  if (/crl|\.crl(?:$|[?#])/i.test(source)) return 'CDP';
   if (/authority information access/i.test(source)) return 'AIA';
   return plan.reason;
 }
 
-function createNetworkValidationPlan(node: CertificateTreeNode): NetworkValidationPlan {
-  const url = node.networkUrl ?? '';
+function createNetworkValidationPlans(node: CertificateTreeNode): NetworkValidationPlan[] {
+  return getNodeNetworkResources(node).map((resource) => createNetworkValidationPlan(node, resource));
+}
+
+function createNetworkValidationPlan(node: CertificateTreeNode, resource = getNodeNetworkResources(node)[0]): NetworkValidationPlan {
+  const url = resource?.url ?? '';
   return {
-    operation: node.networkKind === 'ocsp' || /ocsp/i.test(`${node.label} ${url}`) ? 'OCSP.query' : 'HTTP.fetch',
-    reason: node.label,
+    operation: resource?.kind === 'ocsp' || /ocsp/i.test(`${resource?.label ?? node.label} ${url}`) ? 'OCSP.query' : 'HTTP.fetch',
+    reason: resource && node.label !== resource.label ? `${node.label}: ${resource.label}` : node.label,
     url
   };
+}
+
+function getNodeNetworkResources(node: CertificateTreeNode): CertificateNetworkResource[] {
+  if (node.networkResources?.length) return node.networkResources;
+  if (!node.networkUrl) return [];
+  return [{
+    label: node.label,
+    url: node.networkUrl,
+    kind: node.networkKind ?? 'generic'
+  }];
 }
 
 function getNetworkValidationDescription(plan: NetworkValidationPlan): string {
@@ -1493,13 +1616,19 @@ function isHttpSuccess(status: number): boolean {
 function findIssuerCertificateUrlForOcsp(root: CertificateTreeNode, ocspUrl: string): string | null {
   let issuerUrl: string | null = null;
   walkCertificateNodes(root, (node) => {
-    if (issuerUrl || !node.networkUrl || node.networkUrl === ocspUrl) return;
-    if (node.networkKind === 'ca-issuers') {
-      issuerUrl = node.networkUrl;
-      return;
+    if (issuerUrl) return;
+    for (const resource of getNodeNetworkResources(node)) {
+      if (resource.url === ocspUrl) continue;
+      if (resource.kind === 'ca-issuers') {
+        issuerUrl = resource.url;
+        return;
+      }
+      const target = getValidationTargetLabel(createNetworkValidationPlan(node, resource));
+      if (target === 'AIA CA Issuers') {
+        issuerUrl = resource.url;
+        return;
+      }
     }
-    const target = getValidationTargetLabel(createNetworkValidationPlan(node));
-    if (target === 'AIA CA Issuers') issuerUrl = node.networkUrl ?? null;
   });
   return issuerUrl;
 }

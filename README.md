@@ -79,6 +79,15 @@ Start the local development server:
 npm run dev
 ```
 
+Use the checked-in debug certificate when inspecting the UI manually:
+
+```text
+fixtures/debug-certificate.pem
+fixtures/debug-certificate.der
+```
+
+Open the app, choose `Load` -> `from File`, and select either fixture.
+
 Run the TypeScript and production build checks:
 
 ```sh
@@ -96,7 +105,8 @@ Use the UI-independent API:
 ```ts
 import { CertGadgetsCore } from '@pkistudio/certgadgets';
 
-const certificate = CertGadgetsCore.createDemoCertificate();
+const bytes = new Uint8Array(await file.arrayBuffer());
+const certificate = CertGadgetsCore.createCertificateFromBytes(bytes, file.name);
 const plans = CertGadgetsCore.collectNetworkValidationPlans(certificate);
 ```
 

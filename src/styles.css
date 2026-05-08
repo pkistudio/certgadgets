@@ -685,6 +685,105 @@ button:disabled {
   box-shadow: 6px 6px 0 -1px var(--attribute-knob), 6px 6px 0 0 var(--attribute-knob-edge);
 }
 
+.tree-icon.text-badge {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 13px;
+  margin-top: 1px;
+}
+
+.tree-icon.text-badge::before {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 11px;
+  padding: 0 1px;
+  border: 1px solid var(--attribute-knob-edge);
+  border-radius: 2px;
+  background: linear-gradient(var(--leaf), var(--hover-bg));
+  color: var(--text);
+  font: 900 8px/1 Arial, sans-serif;
+  letter-spacing: 0;
+}
+
+.tree-icon.version::before {
+  content: "Ver";
+}
+
+.tree-icon.serial-number::before {
+  content: "SN";
+}
+
+.tree-icon.algorithm::before {
+  content: "Alg";
+}
+
+.tree-icon.issuer::before {
+  content: "Isr";
+}
+
+.tree-icon.subject::before {
+  content: "Sbj";
+}
+
+.tree-icon.validity::before {
+  content: "Vdt";
+}
+
+.tree-icon.public-key::before {
+  content: "SPKI";
+  font-size: 7px;
+}
+
+.tree-icon.signature-value::before {
+  content: "Sig";
+}
+
+.tree-icon.extension-basic-constraints::before {
+  content: "BC";
+}
+
+.tree-icon.extension-key-usage::before {
+  content: "KU";
+}
+
+.tree-icon.extension-extended-key-usage::before {
+  content: "EKU";
+}
+
+.tree-icon.extension-subject-alt-name::before {
+  content: "SAN";
+}
+
+.tree-icon.extension-issuer-alt-name::before {
+  content: "IAN";
+}
+
+.tree-icon.extension-crl-distribution::before {
+  content: "CDP";
+}
+
+.tree-icon.extension-certificate-policies::before {
+  content: "CP";
+}
+
+.tree-icon.extension-authority-info-access::before {
+  content: "AIA";
+}
+
+.tree-icon.extension-subject-key-identifier::before {
+  content: "SKI";
+}
+
+.tree-icon.extension-authority-key-identifier::before {
+  content: "AKI";
+}
+
+.tree-icon.extension-generic::before {
+  content: "ext";
+}
+
 .tree-item {
   display: flex;
   flex: 1 1 auto;
@@ -890,6 +989,56 @@ button:disabled {
 .network-target {
   display: grid;
   gap: 4px;
+}
+
+.network-targets {
+  display: grid;
+  gap: 8px;
+}
+
+.network-targets .network-target {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 12px;
+}
+
+.network-target-action {
+  justify-self: end;
+  min-width: 170px;
+  max-width: 240px;
+  text-align: center;
+}
+
+.network-target-main {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.network-target-meta {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  border-top: 1px solid var(--subtle-border);
+}
+
+.network-target-meta div {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) minmax(0, 1fr);
+  gap: 8px;
+  padding-top: 7px;
+}
+
+.network-target-meta dt,
+.network-target-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.network-target-meta dt {
+  color: var(--muted);
 }
 
 .network-action {

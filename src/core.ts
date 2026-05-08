@@ -1,5 +1,5 @@
 import * as asn1js from 'asn1js';
-import { Certificate, InfoAccess, type Extension, type GeneralName, type RelativeDistinguishedNames } from 'pkijs';
+import { Certificate, ExtKeyUsage, InfoAccess, type Extension, type GeneralName, type RelativeDistinguishedNames } from 'pkijs';
 
 export type CertificateNodeKind =
   | 'certificate'
@@ -25,16 +25,24 @@ export type CertificateDetail = {
   value: string;
 };
 
+export type CertificateNetworkResource = {
+  label: string;
+  url: string;
+  kind: NetworkResourceKind;
+};
+
 export type CertificateTreeNode = {
   id: string;
   kind: CertificateNodeKind;
   label: string;
   note?: string;
+  treeValue?: string;
   view: CertificateNodeView;
   details?: CertificateDetail[];
   derBytes?: Uint8Array;
   networkUrl?: string;
   networkKind?: NetworkResourceKind;
+  networkResources?: CertificateNetworkResource[];
   children?: CertificateTreeNode[];
 };
 
@@ -122,6 +130,7 @@ export function createCertificateFromBytes(bytes: Uint8Array, sourceName: string
     serialNumber: formatSerialNumber(certificate.serialNumber.valueBlock.valueHexView),
     validity: `${formatDate(certificate.notBefore.value)} to ${formatDate(certificate.notAfter.value)}`,
     publicKey: formatAlgorithm(certificate.subjectPublicKeyInfo.algorithm.algorithmId),
+    publicKeySki: bytesToHexString(sha1(certificate.subjectPublicKeyInfo.subjectPublicKey.valueBlock.valueHexView)),
     signatureAlgorithm: formatAlgorithm(certificate.signature.algorithmId),
     certificateSignatureAlgorithm: formatAlgorithm(certificate.signatureAlgorithm.algorithmId),
     certificateSignature: `${formatAlgorithm(certificate.signatureAlgorithm.algorithmId)} (${certificate.signatureValue.valueBlock.valueHexView.byteLength} bytes)`,
@@ -145,16 +154,17 @@ export function collectNetworkValidationPlans(document: CertificateDocument): Ne
   const plans: NetworkValidationPlan[] = [];
   const planKeys = new Set<string>();
   walkNodes(document.root, (node) => {
-    if (!node.networkUrl) return;
-    const operation = getNetworkOperation(node.label, node.networkUrl, node.networkKind);
-    const planKey = `${operation}:${node.networkUrl}`;
-    if (planKeys.has(planKey)) return;
-    planKeys.add(planKey);
-    plans.push({
-      operation,
-      reason: node.label,
-      url: node.networkUrl
-    });
+    for (const resource of getNodeNetworkResources(node)) {
+      const operation = getNetworkOperation(resource.label, resource.url, resource.kind);
+      const planKey = `${operation}:${resource.url}`;
+      if (planKeys.has(planKey)) continue;
+      planKeys.add(planKey);
+      plans.push({
+        operation,
+        reason: getNetworkResourceReason(node.label, resource),
+        url: resource.url
+      });
+    }
   });
   return plans;
 }
@@ -177,6 +187,7 @@ function buildCertificateDocument(input: {
   serialNumber: string;
   validity: string;
   publicKey: string;
+  publicKeySki?: string;
   signatureAlgorithm: string;
   certificateSignatureAlgorithm: string;
   certificateSignature: string;
@@ -222,7 +233,7 @@ function buildCertificateDocument(input: {
       createLeaf(rootId, 'issuer', 'Issuer', input.issuer, input.issuerDer ?? mockBytes('issuer')),
       createLeaf(rootId, 'validity', 'Validity', input.validity, input.validityDer ?? mockBytes('validity')),
       createLeaf(rootId, 'subject', 'Subject', input.subject, input.subjectDer ?? mockBytes('subject')),
-      createLeaf(rootId, 'public-key', 'Subject Public Key Info', input.publicKey, input.publicKeyDer ?? mockBytes('public-key')),
+      createPublicKeyLeaf(rootId, input.publicKey, input.publicKeyDer ?? mockBytes('public-key'), input.publicKeySki),
       ...(input.issuerUniqueIdDer ? [createLeaf(rootId, 'issuer-unique-id', 'Issuer Unique ID', `${input.issuerUniqueIdDer.byteLength} bytes`, input.issuerUniqueIdDer)] : []),
       ...(input.subjectUniqueIdDer ? [createLeaf(rootId, 'subject-unique-id', 'Subject Unique ID', `${input.subjectUniqueIdDer.byteLength} bytes`, input.subjectUniqueIdDer)] : []),
       {
@@ -252,15 +263,31 @@ function buildCertificateDocument(input: {
   };
 }
 
-function createLeaf(parentId: string, kind: CertificateNodeKind, label: string, value: string, derBytes: Uint8Array): CertificateTreeNode {
+function createLeaf(parentId: string, kind: CertificateNodeKind, label: string, value: string, derBytes: Uint8Array, treeValue?: string): CertificateTreeNode {
   return {
     id: `${parentId}:${kind}`,
     kind,
     label,
     note: value,
+    treeValue,
     view: 'der',
     derBytes,
     details: [{ label, value }]
+  };
+}
+
+function createPublicKeyLeaf(parentId: string, value: string, derBytes: Uint8Array, ski?: string): CertificateTreeNode {
+  return {
+    id: `${parentId}:public-key`,
+    kind: 'public-key',
+    label: 'Subject Public Key Info',
+    note: value,
+    view: 'der',
+    derBytes,
+    details: [
+      { label: 'Subject Public Key Info', value },
+      ...(ski ? [{ label: 'SKI', value: ski }] : [])
+    ]
   };
 }
 
@@ -268,16 +295,13 @@ type ExtensionInput = {
   id: string;
   label: string;
   summary: string;
+  treeValue?: string;
   derBytes: Uint8Array;
   details: CertificateDetail[];
   networkResources: ExtensionNetworkResource[];
 };
 
-type ExtensionNetworkResource = {
-  label: string;
-  url: string;
-  kind: NetworkResourceKind;
-};
+type ExtensionNetworkResource = CertificateNetworkResource;
 
 function createExtension(parentId: string, extension: ExtensionInput): CertificateTreeNode {
   const [networkResource] = extension.networkResources;
@@ -285,27 +309,30 @@ function createExtension(parentId: string, extension: ExtensionInput): Certifica
     id: `${parentId}:extension:${extension.id}`,
     kind: 'extension',
     label: extension.label,
-    note: networkResource ? 'network resource' : extension.summary,
+    note: extension.networkResources.length > 1 ? `${extension.networkResources.length} network resources` : networkResource ? 'network resource' : extension.summary,
     view: networkResource ? 'network' : 'extension',
     derBytes: extension.derBytes,
     networkUrl: networkResource?.url,
     networkKind: networkResource?.kind,
+    networkResources: extension.networkResources.length > 0 ? extension.networkResources : undefined,
+    treeValue: extension.treeValue,
     details: extension.details,
-    children: extension.networkResources.slice(1).map((resource, index) => ({
-      id: `${parentId}:extension:${extension.id}:network-${index}`,
-      kind: 'network-resource',
-      label: resource.label,
-      note: 'explicit',
-      view: 'network',
-      networkUrl: resource.url,
-      networkKind: resource.kind,
-      details: [
-        { label: 'Source', value: extension.label },
-        { label: 'Access method', value: resource.label },
-        { label: 'Target', value: resource.url }
-      ]
-    }))
+    children: []
   };
+}
+
+function getNodeNetworkResources(node: CertificateTreeNode): CertificateNetworkResource[] {
+  if (node.networkResources?.length) return node.networkResources;
+  if (!node.networkUrl) return [];
+  return [{
+    label: node.label,
+    url: node.networkUrl,
+    kind: node.networkKind ?? 'generic'
+  }];
+}
+
+function getNetworkResourceReason(nodeLabel: string, resource: CertificateNetworkResource): string {
+  return nodeLabel === resource.label ? nodeLabel : `${nodeLabel}: ${resource.label}`;
 }
 
 function createExtensionInput(extension: Extension): ExtensionInput {
@@ -326,6 +353,7 @@ function createExtensionInput(extension: Extension): ExtensionInput {
     id: extension.extnID.replace(/[^a-z0-9]+/gi, '-'),
     label,
     summary: decodedValues[0] ?? `${extension.extnID}${extension.critical ? ' critical' : ''}`,
+    treeValue: isPresetExtension(extension.extnID, label) ? undefined : bytesToHexString(extension.extnValue.valueBlock.valueHexView),
     derBytes: toBytes(extension.toSchema().toBER(false)),
     details,
     networkResources
@@ -358,6 +386,85 @@ function createDemoExtension(id: string, label: string, summary: string, network
     details: [{ label: 'Value', value: summary }],
     networkResources
   };
+}
+
+function isPresetExtension(extensionId: string, label: string): boolean {
+  return extensionId === '2.5.29.19' ||
+    extensionId === '2.5.29.15' ||
+    extensionId === '2.5.29.37' ||
+    extensionId === '2.5.29.17' ||
+    extensionId === '2.5.29.18' ||
+    extensionId === '2.5.29.31' ||
+    extensionId === '2.5.29.32' ||
+    extensionId === '1.3.6.1.5.5.7.1.1' ||
+    extensionId === '2.5.29.14' ||
+    extensionId === '2.5.29.35' ||
+    /^(basic constraints|key usage|extended key usage|subject alternative name|issuer alternative name|crl distribution points|certificate policies|authority information access|subject key identifier|authority key identifier)$/i.test(label);
+}
+
+function bytesToHexString(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(' ');
+}
+
+function sha1(bytes: Uint8Array): Uint8Array {
+  const bitLength = bytes.byteLength * 8;
+  const paddedLength = Math.ceil((bytes.byteLength + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.byteLength] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+  view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+
+  let h0 = 0x67452301;
+  let h1 = 0xefcdab89;
+  let h2 = 0x98badcfe;
+  let h3 = 0x10325476;
+  let h4 = 0xc3d2e1f0;
+  const words = new Uint32Array(80);
+
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(offset + index * 4, false);
+    for (let index = 16; index < 80; index += 1) words[index] = rotateLeft(words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16], 1);
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+
+    for (let index = 0; index < 80; index += 1) {
+      const [f, k] = getSha1Round(index, b, c, d);
+      const temp = (rotateLeft(a, 5) + f + e + k + words[index]) >>> 0;
+      e = d;
+      d = c;
+      c = rotateLeft(b, 30);
+      b = a;
+      a = temp;
+    }
+
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+  }
+
+  const hash = new Uint8Array(20);
+  const hashView = new DataView(hash.buffer);
+  [h0, h1, h2, h3, h4].forEach((word, index) => hashView.setUint32(index * 4, word, false));
+  return hash;
+}
+
+function getSha1Round(index: number, b: number, c: number, d: number): [number, number] {
+  if (index < 20) return [((b & c) | (~b & d)) >>> 0, 0x5a827999];
+  if (index < 40) return [(b ^ c ^ d) >>> 0, 0x6ed9eba1];
+  if (index < 60) return [((b & c) | (b & d) | (c & d)) >>> 0, 0x8f1bbcdc];
+  return [(b ^ c ^ d) >>> 0, 0xca62c1d6];
+}
+
+function rotateLeft(value: number, bits: number): number {
+  return ((value << bits) | (value >>> (32 - bits))) >>> 0;
 }
 
 function mockBytes(label: string): Uint8Array {
@@ -464,9 +571,68 @@ function summarizeKnownExtension(extension: Extension, decoded: asn1js.AsnType):
   }
 
   if (extension.extnID === '2.5.29.35') return 'Authority key identifier';
-  if (extension.extnID === '2.5.29.15') return `Key usage bits (${extension.extnValue.valueBlock.valueHexView.byteLength} bytes)`;
+  if (extension.extnID === '2.5.29.15') {
+    const usages = getKeyUsageValues(decoded);
+    return usages.length > 0 ? usages.join(', ') : `Key usage bits (${extension.extnValue.valueBlock.valueHexView.byteLength} bytes)`;
+  }
+  if (extension.extnID === '2.5.29.37') {
+    const usages = getExtendedKeyUsageValues(decoded);
+    return usages.length > 0 ? usages.join(', ') : `Extended key usage (${extension.extnValue.valueBlock.valueHexView.byteLength} bytes)`;
+  }
 
   return `${getExtensionName(extension.extnID)} value (${extension.extnValue.valueBlock.valueHexView.byteLength} bytes)`;
+}
+
+function getKeyUsageValues(decoded: asn1js.AsnType): string[] {
+  if (!(decoded instanceof asn1js.BitString)) return [];
+  const bytes = decoded.valueBlock.valueHexView;
+  const usages = [
+    'Digital Signature',
+    'Content Commitment',
+    'Key Encipherment',
+    'Data Encipherment',
+    'Key Agreement',
+    'Key Cert Sign',
+    'CRL Sign',
+    'Encipher Only',
+    'Decipher Only'
+  ];
+  return usages.filter((_, bitIndex) => isBitSet(bytes, bitIndex));
+}
+
+function isBitSet(bytes: Uint8Array, bitIndex: number): boolean {
+  const byte = bytes[Math.floor(bitIndex / 8)];
+  if (byte === undefined) return false;
+  return (byte & (0x80 >> (bitIndex % 8))) !== 0;
+}
+
+function getExtendedKeyUsageValues(decoded: asn1js.AsnType): string[] {
+  try {
+    return new ExtKeyUsage({ schema: decoded }).keyPurposes.map(getKeyPurposeName);
+  } catch {
+    if (!(decoded instanceof asn1js.Sequence)) return [];
+    return decoded.valueBlock.value.flatMap((value) => value instanceof asn1js.ObjectIdentifier ? [getKeyPurposeName(value.getValue())] : []);
+  }
+}
+
+function getKeyPurposeName(oid: string): string {
+  const names: Record<string, string> = {
+    '1.3.6.1.5.5.7.3.1': 'TLS Web Server Authentication',
+    '1.3.6.1.5.5.7.3.2': 'TLS Web Client Authentication',
+    '1.3.6.1.5.5.7.3.3': 'Code Signing',
+    '1.3.6.1.5.5.7.3.4': 'Email Protection',
+    '1.3.6.1.5.5.7.3.5': 'IPsec End System',
+    '1.3.6.1.5.5.7.3.6': 'IPsec Tunnel',
+    '1.3.6.1.5.5.7.3.7': 'IPsec User',
+    '1.3.6.1.5.5.7.3.8': 'Time Stamping',
+    '1.3.6.1.5.5.7.3.9': 'OCSP Signing',
+    '1.3.6.1.5.5.7.3.10': 'DVCS',
+    '1.3.6.1.5.5.7.3.13': 'EAP over PPP',
+    '1.3.6.1.5.5.7.3.14': 'EAP over LAN',
+    '1.3.6.1.5.5.7.3.17': 'IPsec IKE',
+    '2.5.29.37.0': 'Any Extended Key Usage'
+  };
+  return names[oid] ?? oid;
 }
 
 function collectNetworkResourcesFromExtension(extension: Extension): ExtensionNetworkResource[] {
@@ -592,6 +758,7 @@ function getExtensionName(oid: string): string {
     '2.5.29.14': 'Subject Key Identifier',
     '2.5.29.15': 'Key Usage',
     '2.5.29.17': 'Subject Alternative Name',
+    '2.5.29.18': 'Issuer Alternative Name',
     '2.5.29.19': 'Basic Constraints',
     '2.5.29.31': 'CRL Distribution Points',
     '2.5.29.32': 'Certificate Policies',
