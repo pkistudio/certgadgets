@@ -1,11 +1,16 @@
 import type { IncomingMessage } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 
 const DEV_FETCH_PROXY_PATH = '/__certgadgets_fetch';
+const packageJson = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8')) as { version: string };
 
 export default defineConfig({
   base: './',
+  define: {
+    __CERTGADGETS_VERSION__: JSON.stringify(packageJson.version)
+  },
   plugins: [certgadgetsDevFetchProxy()],
   build: {
     rollupOptions: {
@@ -14,6 +19,7 @@ export default defineConfig({
         main: resolve(__dirname, 'index.html'),
         viewer: resolve(__dirname, 'viewer.html'),
         core: resolve(__dirname, 'src/core.ts'),
+        validation: resolve(__dirname, 'src/validation.ts'),
         app: resolve(__dirname, 'src/app.ts')
       },
       output: {

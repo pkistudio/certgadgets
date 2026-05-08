@@ -1,15 +1,33 @@
 import './styles.css';
-import * as asn1js from 'asn1js';
 import PkiStudioOidResolver from '@pkistudio/pkistudiojs/oid-resolver';
 import PkiStudio, { type PkiStudioViewerInstance } from '@pkistudio/pkistudiojs/viewer';
-import { Certificate, OCSPRequest, OCSPResponse } from 'pkijs';
 import {
   CertGadgetsCore,
-  type CertificateNetworkResource,
+  bytesToBase64,
+  canDecodeAsn1,
+  derToPem,
+  hexToBytes,
+  toArrayBuffer,
+  wrapBytesInOctetString,
   type CertificateDocument,
   type CertificateTreeNode,
   type NetworkValidationPlan
 } from './core';
+import {
+  assessValidationContent,
+  createNetworkValidationPlans,
+  createValidationArtifacts,
+  createValidationResultSummary,
+  getNetworkResultByteLength,
+  getNetworkValidationDescription,
+  getValidationTargetLabel,
+  isHttpSuccess,
+  isValidationArtifactCertificate,
+  prepareNetworkValidationPlan,
+  type NetworkFetchResult,
+  type ValidationDataArtifact,
+  type ValidationResultStatus
+} from './validation';
 
 const TREE_ITEM_TRUNCATE_THRESHOLD = 255;
 const TREE_ITEM_TEXT_LIMIT = 250;
@@ -30,8 +48,6 @@ type SaveFileHandle = {
   createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
 };
 
-type ValidationResultStatus = 'OK' | 'NG' | '...';
-
 type ValidationResultEntry = {
   id: string;
   timestamp: Date;
@@ -40,26 +56,6 @@ type ValidationResultEntry = {
   detail: string;
   transcript: string;
   artifacts: ValidationDataArtifact[];
-};
-
-type ValidationDataArtifact = {
-  id: string;
-  label: string;
-  direction: 'sent' | 'received';
-  bytes: Uint8Array;
-  mediaType?: string;
-  contentKind: ValidationDataArtifactKind;
-};
-
-type ValidationDataArtifactKind = 'certificate' | 'asn1' | 'raw';
-
-type NetworkFetchResult = {
-  status: number;
-  byteLength?: number;
-  bytes?: Uint8Array;
-  mediaType?: string;
-  sentBytes?: Uint8Array;
-  sentMediaType?: string;
 };
 
 type ViewerRoot = DocumentFragment | Element;
@@ -442,7 +438,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
       return;
     }
     const filename = `${createSafeFileBase(document.sourceName || document.label) || 'certificate'}.pem`;
-    await saveTextToFile(derToPem(bytes), filename, 'application/x-pem-file', [{ description: 'PEM files', accept: { 'application/x-pem-file': ['.pem', '.crt', '.cer'] } }]);
+    await saveTextToFile(derToPem('CERTIFICATE', bytes), filename, 'application/x-pem-file', [{ description: 'PEM files', accept: { 'application/x-pem-file': ['.pem', '.crt', '.cer'] } }]);
     setNotice(`Saved ${document.label} as ${filename}.`);
     logOperation(apiLogList, 'PEM.save', `Saved ${document.sourceName} as PEM (${bytes.byteLength} DER bytes).`);
   }
@@ -469,10 +465,14 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
     try {
       transcript.push(createTranscriptLine('Network access approved. Preparing request.'));
-      const preparedPlan = await prepareNetworkValidationPlan(plan, document, transcript);
+      const preparedPlan = await prepareNetworkValidationPlan(plan, {
+        document,
+        fetchNetworkResource,
+        addTranscriptLine: (message) => transcript.push(createTranscriptLine(message))
+      });
       transcript.push(createTranscriptLine('Sending request.'));
       const result = await fetchNetworkResource(preparedPlan);
-      const contentAssessment = await assessValidationContent(preparedPlan, result);
+      const contentAssessment = await assessValidationContent(preparedPlan, result, { createTranscriptLine });
       const status: ValidationResultStatus = isHttpSuccess(result.status) && contentAssessment.status !== 'NG' ? 'OK' : 'NG';
       const byteLength = getNetworkResultByteLength(result);
       transcript.push(createTranscriptLine(`Received HTTP status ${result.status}.`));
@@ -493,43 +493,6 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
   async function confirmNetworkAccess(plan: NetworkValidationPlan): Promise<boolean> {
     if (options.host?.confirmNetworkAccess) return Boolean(await options.host.confirmNetworkAccess(plan));
     return window.confirm(`Allow network access for ${plan.reason}?\n\n${plan.url}`);
-  }
-
-  async function prepareNetworkValidationPlan(plan: NetworkValidationPlan, document: CertificateDocument | null, transcript: string[]): Promise<NetworkValidationPlan> {
-    if (getValidationTargetLabel(plan) !== 'OCSP') return plan;
-    if (!document?.root.derBytes) throw new Error('OCSP request cannot be generated because no target certificate bytes are loaded.');
-
-    const issuerUrl = findIssuerCertificateUrlForOcsp(document.root, plan.url);
-    if (!issuerUrl) throw new Error('OCSP request cannot be generated because no AIA CA Issuers URL was found in the certificate.');
-
-    transcript.push(createTranscriptLine(`Fetching issuer certificate for OCSP CertID from ${issuerUrl}.`));
-    const issuerResult = await fetchNetworkResource({
-      operation: 'HTTP.fetch',
-      reason: 'AIA CA Issuers for OCSP request',
-      url: issuerUrl,
-      acceptMediaType: 'application/pkix-cert'
-    });
-    const issuerByteLength = getNetworkResultByteLength(issuerResult);
-    transcript.push(createTranscriptLine(`Issuer certificate fetch returned HTTP status ${issuerResult.status} with ${issuerByteLength} bytes.`));
-    if (!isHttpSuccess(issuerResult.status)) throw new Error(`OCSP request cannot be generated because issuer certificate fetch returned HTTP status ${issuerResult.status}.`);
-    if (!issuerResult.bytes || issuerResult.bytes.byteLength === 0) throw new Error('OCSP request cannot be generated because issuer certificate bytes were not available.');
-
-    const targetCertificate = parseCertificateForOcsp(document.root.derBytes, 'target certificate');
-    const issuerCertificate = parseCertificateForOcsp(issuerResult.bytes, 'issuer certificate');
-    const requestBytes = await createOcspRequestBytes(targetCertificate, issuerCertificate);
-    transcript.push(createTranscriptLine(`Generated OCSP request DER (${requestBytes.byteLength} bytes) using issuer certificate from AIA CA Issuers.`));
-
-    return {
-      ...plan,
-      method: 'POST',
-      requestBytes,
-      requestMediaType: 'application/ocsp-request',
-      acceptMediaType: 'application/ocsp-response',
-      targetCertificateBytes: document.root.derBytes,
-      issuerCertificateBytes: issuerResult.bytes,
-      issuerCertificateMediaType: issuerResult.mediaType,
-      issuerCertificateUrl: issuerUrl
-    };
   }
 
   async function fetchNetworkResource(plan: NetworkValidationPlan): Promise<NetworkFetchResult> {
@@ -1151,14 +1114,6 @@ async function readTextFromClipboard(): Promise<string> {
   return navigator.clipboard.readText();
 }
 
-function hexToBytes(text: string): Uint8Array {
-  const hex = text.replace(/[^0-9a-f]/gi, '');
-  if (hex.length === 0 || hex.length % 2 !== 0) throw new Error('Clipboard HEX input must contain an even number of hex digits.');
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  return bytes;
-}
-
 async function saveBytesToFile(bytes: Uint8Array, fileName: string): Promise<void> {
   const blob = new Blob([toArrayBuffer(bytes)], { type: 'application/pkix-cert' });
   await saveBlobToFile(blob, fileName, [{ description: 'DER files', accept: { 'application/octet-stream': ['.der', '.cer'] } }]);
@@ -1188,18 +1143,6 @@ async function saveBlobToFile(blob: Blob, fileName: string, types: SaveFilePicke
   URL.revokeObjectURL(url);
 }
 
-function derToPem(bytes: Uint8Array): string {
-  const base64 = bytesToBase64(bytes);
-  const lines = base64.match(/.{1,64}/g) ?? [];
-  return `-----BEGIN CERTIFICATE-----\n${lines.join('\n')}\n-----END CERTIFICATE-----\n`;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
 function prepareArtifactBytesForViewer(bytes: Uint8Array, label: string): { bytes: Uint8Array; label: string } | null {
   if (canDecodeAsn1(bytes)) return { bytes, label };
 
@@ -1211,35 +1154,8 @@ function prepareArtifactBytesForViewer(bytes: Uint8Array, label: string): { byte
   };
 }
 
-function canDecodeAsn1(bytes: Uint8Array): boolean {
-  try {
-    const parsed = asn1js.fromBER(toArrayBuffer(bytes));
-    return parsed.offset !== -1 && parsed.offset === bytes.byteLength;
-  } catch {
-    return false;
-  }
-}
-
-function wrapBytesInOctetString(bytes: Uint8Array): Uint8Array {
-  return new Uint8Array(new asn1js.OctetString({ valueHex: toArrayBuffer(bytes) }).toBER(false));
-}
-
-function normalizeCertificateBytes(bytes: Uint8Array): Uint8Array {
-  const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-  const pemMatch = /-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/i.exec(text);
-  if (!pemMatch) return bytes;
-  const binary = atob(pemMatch[1].replace(/\s+/g, ''));
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
 function createSafeFileBase(value: string): string {
   return value.toLowerCase().replace(/\.[a-z0-9]+$/i, '').replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-}
-
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy.buffer;
 }
 
 function getDevFetchProxyUrl(targetUrl: string): string | null {
@@ -1370,289 +1286,6 @@ function findNodeInTree(node: CertificateTreeNode, nodeId: string): CertificateT
     if (found) return found;
   }
   return null;
-}
-
-function getValidationTargetLabel(plan: NetworkValidationPlan): string {
-  const reason = plan.reason;
-  const source = `${reason} ${plan.operation} ${plan.url}`;
-  if (/ocsp/i.test(source)) return 'OCSP';
-  if (/ca issuers|issuer certificate|fetch issuer|issuer/i.test(reason)) return 'AIA CA Issuers';
-  if (/issuer|ca issuers|\.cer(?:$|[?#])/i.test(source)) return 'AIA CA Issuers';
-  if (/crl|\.crl(?:$|[?#])/i.test(source)) return 'CDP';
-  if (/authority information access/i.test(source)) return 'AIA';
-  return plan.reason;
-}
-
-function createNetworkValidationPlans(node: CertificateTreeNode): NetworkValidationPlan[] {
-  return getNodeNetworkResources(node).map((resource) => createNetworkValidationPlan(node, resource));
-}
-
-function createNetworkValidationPlan(node: CertificateTreeNode, resource = getNodeNetworkResources(node)[0]): NetworkValidationPlan {
-  const url = resource?.url ?? '';
-  return {
-    operation: resource?.kind === 'ocsp' || /ocsp/i.test(`${resource?.label ?? node.label} ${url}`) ? 'OCSP.query' : 'HTTP.fetch',
-    reason: resource && node.label !== resource.label ? `${node.label}: ${resource.label}` : node.label,
-    url
-  };
-}
-
-function getNodeNetworkResources(node: CertificateTreeNode): CertificateNetworkResource[] {
-  if (node.networkResources?.length) return node.networkResources;
-  if (!node.networkUrl) return [];
-  return [{
-    label: node.label,
-    url: node.networkUrl,
-    kind: node.networkKind ?? 'generic'
-  }];
-}
-
-function getNetworkValidationDescription(plan: NetworkValidationPlan): string {
-  const target = getValidationTargetLabel(plan);
-  if (target === 'CDP') return 'Fetch the certificate revocation list from this CRL Distribution Point over the network, then record the HTTP result in the Validation pane and operation log.';
-  if (target === 'OCSP') return 'Send an OCSP validation request to this responder endpoint over the network, then record the response status in the Validation pane and operation log.';
-  if (target === 'AIA CA Issuers') return 'Fetch the issuer certificate from this Authority Information Access CA Issuers URL over the network, then record the HTTP result in the Validation pane and operation log.';
-  if (target === 'AIA') return 'Use this Authority Information Access URL for an explicit network-assisted validation request, then record the result in the Validation pane and operation log.';
-  return 'Run this explicit network-assisted validation request and record the result in the Validation pane and operation log.';
-}
-
-function getNetworkResultByteLength(result: { byteLength?: number; bytes?: Uint8Array }): number {
-  return result.bytes?.byteLength ?? result.byteLength ?? 0;
-}
-
-function createValidationArtifacts(plan: NetworkValidationPlan, result: NetworkFetchResult): ValidationDataArtifact[] {
-  const artifacts: ValidationDataArtifact[] = [];
-  const sentBytes = result.sentBytes ?? plan.requestBytes;
-  const sentMediaType = result.sentMediaType ?? plan.requestMediaType;
-
-  if (plan.issuerCertificateBytes && plan.issuerCertificateBytes.byteLength > 0) {
-    artifacts.push(createValidationDataArtifact({
-      id: 'issuer-certificate-1',
-      label: 'AIA CA Issuers certificate',
-      direction: 'received',
-      bytes: plan.issuerCertificateBytes,
-      mediaType: plan.issuerCertificateMediaType
-    }));
-  }
-
-  if (sentBytes && sentBytes.byteLength > 0) {
-    artifacts.push(createValidationDataArtifact({
-      id: 'sent-1',
-      label: `${getValidationTargetLabel(plan)} request`,
-      direction: 'sent',
-      bytes: sentBytes,
-      mediaType: sentMediaType
-    }));
-  }
-
-  if (result.bytes && result.bytes.byteLength > 0) {
-    artifacts.push(createValidationDataArtifact({
-      id: 'received-1',
-      label: `${getValidationTargetLabel(plan)} response`,
-      direction: 'received',
-      bytes: result.bytes,
-      mediaType: result.mediaType
-    }));
-  }
-
-  return artifacts;
-}
-
-function createValidationDataArtifact(artifact: Omit<ValidationDataArtifact, 'contentKind'>): ValidationDataArtifact {
-  return {
-    ...artifact,
-    contentKind: detectValidationDataArtifactKind(artifact.bytes, artifact.mediaType)
-  };
-}
-
-function detectValidationDataArtifactKind(bytes: Uint8Array, mediaType?: string): ValidationDataArtifactKind {
-  if (isCertificateBytes(bytes, mediaType)) return 'certificate';
-  if (canDecodeAsn1(bytes)) return 'asn1';
-  return 'raw';
-}
-
-function isValidationArtifactCertificate(artifact: ValidationDataArtifact): boolean {
-  return artifact.contentKind === 'certificate' || isCertificateBytes(artifact.bytes, artifact.mediaType);
-}
-
-function isCertificateBytes(bytes: Uint8Array, mediaType?: string): boolean {
-  if (mediaType && /(?:application\/(?:pkix-cert|x-x509-ca-cert)|certificate)/i.test(mediaType)) return canParseCertificateBytes(bytes);
-  return canParseCertificateBytes(bytes);
-}
-
-function canParseCertificateBytes(bytes: Uint8Array): boolean {
-  try {
-    Certificate.fromBER(toArrayBuffer(normalizeCertificateBytes(bytes)));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-type OcspResponseAssessment = {
-  ok: boolean;
-  summary: string;
-  transcript: string[];
-};
-
-async function assessValidationContent(plan: NetworkValidationPlan, result: { status: number; byteLength?: number; bytes?: Uint8Array }): Promise<{ status: ValidationResultStatus; summary?: string; transcript: string[] }> {
-  const ocspStatus = getValidationTargetLabel(plan) === 'OCSP' && isHttpSuccess(result.status) ? await getOcspResponseAssessment(plan, result.bytes) : null;
-  return {
-    status: getValidationContentStatus(plan, result, ocspStatus),
-    summary: ocspStatus?.summary,
-    transcript: createValidationFollowUpTranscript(plan, result, ocspStatus)
-  };
-}
-
-function createValidationResultSummary(plan: NetworkValidationPlan, result: { status: number }, byteLength: number, contentAssessment: { summary?: string }): string {
-  const contentSummary = contentAssessment.summary ? `; ${contentAssessment.summary}` : '';
-  return `${plan.operation} completed with HTTP status ${result.status}${contentSummary}; received ${byteLength} bytes from ${plan.url}.`;
-}
-
-function getValidationContentStatus(plan: NetworkValidationPlan, result: { status: number; bytes?: Uint8Array }, ocspStatus: { ok: boolean } | null = null): ValidationResultStatus {
-  if (!isHttpSuccess(result.status)) return 'NG';
-  if (getValidationTargetLabel(plan) !== 'OCSP') return 'OK';
-  return ocspStatus?.ok ? 'OK' : 'NG';
-}
-
-function createValidationFollowUpTranscript(plan: NetworkValidationPlan, result: { status: number; byteLength?: number; bytes?: Uint8Array }, ocspStatus: OcspResponseAssessment | null = null): string[] {
-  const target = getValidationTargetLabel(plan);
-  if (!isHttpSuccess(result.status)) return [createTranscriptLine(`Skipped ${target} content checks because HTTP status ${result.status} is not successful.`)];
-  if (!result.bytes || result.bytes.byteLength === 0) return [createTranscriptLine(`${target} response body bytes were not available to inspect.`)];
-  if (target === 'CDP') return [
-    createTranscriptLine('CRL bytes received. Queued DER/PEM decoding check.'),
-    createTranscriptLine('CRL issuer, thisUpdate, nextUpdate, and revoked-certificate entries would be inspected here.'),
-    createTranscriptLine('Certificate revocation matching is not performed silently beyond this explicit operation in the current prototype.')
-  ];
-  if (target === 'OCSP') return createOcspTranscript(ocspStatus);
-  if (target === 'AIA CA Issuers') return [
-    createTranscriptLine('Issuer-certificate bytes received. Queued X.509 parsing check.'),
-    createTranscriptLine('Issuer subject/authority key data would be compared against the loaded certificate in a full validation flow.')
-  ];
-  return [createTranscriptLine(`${target} response bytes received. Queued target-specific parsing checks.`)];
-}
-
-function createOcspTranscript(assessment: OcspResponseAssessment | null): string[] {
-  if (!assessment) return [
-    createTranscriptLine('OCSP response could not be assessed.'),
-    createTranscriptLine('BasicOCSPResponse signature, producedAt, thisUpdate, nextUpdate, and responder identity are not validated yet.')
-  ];
-
-  return [
-    ...assessment.transcript,
-    createTranscriptLine('BasicOCSPResponse signature, producedAt, thisUpdate, nextUpdate, and responder identity are not validated yet.')
-  ];
-}
-
-async function getOcspResponseAssessment(plan: NetworkValidationPlan, bytes: Uint8Array | undefined): Promise<OcspResponseAssessment> {
-  if (!bytes || bytes.byteLength === 0) return createOcspAssessment(false, 'OCSP responseStatus unavailable', 'OCSP responseStatus could not be decoded because no response bytes were available.');
-
-  try {
-    const parsed = asn1js.fromBER(toArrayBuffer(bytes));
-    if (parsed.offset === -1 || parsed.offset !== bytes.byteLength || !(parsed.result instanceof asn1js.Sequence)) {
-      return createOcspAssessment(false, 'OCSP responseStatus undecodable', 'OCSP responseStatus could not be decoded because the response is not a complete OCSPResponse sequence.');
-    }
-
-    const ocspResponse = new OCSPResponse({ schema: parsed.result });
-    const status = ocspResponse.responseStatus.valueBlock.valueDec;
-    const statusName = getOcspResponseStatusName(status);
-    const responseStatusLine = `OCSP responseStatus is ${statusName} (${status}).`;
-
-    if (status !== 0) return createOcspAssessment(false, `OCSP responseStatus ${statusName} (${status})`, responseStatusLine);
-    if (!ocspResponse.responseBytes) return createOcspAssessment(false, 'OCSP responseStatus successful (0); BasicOCSPResponse missing', responseStatusLine, 'OCSP responseStatus is successful, but responseBytes is missing so certificate status could not be checked.');
-
-    if (!plan.targetCertificateBytes || !plan.issuerCertificateBytes) {
-      return createOcspAssessment(false, 'OCSP responseStatus successful (0); certificate status unverified', responseStatusLine, 'Certificate status could not be checked because target or issuer certificate bytes were not available.');
-    }
-
-    const targetCertificate = parseCertificateForOcsp(plan.targetCertificateBytes, 'target certificate');
-    const issuerCertificate = parseCertificateForOcsp(plan.issuerCertificateBytes, 'issuer certificate');
-    const certificateStatus = await ocspResponse.getCertificateStatus(targetCertificate, issuerCertificate);
-    if (!certificateStatus.isForCertificate) {
-      return createOcspAssessment(false, 'OCSP responseStatus successful (0); response does not match certificate', responseStatusLine, 'OCSP BasicOCSPResponse does not contain a SingleResponse matching the target certificate CertID.');
-    }
-
-    const certificateStatusName = getOcspCertificateStatusName(certificateStatus.status);
-    const certificateStatusLine = `OCSP certificate status is ${certificateStatusName} (${certificateStatus.status}).`;
-    return createOcspAssessment(
-      certificateStatus.status === 0,
-      `OCSP responseStatus successful (0); certificate status ${certificateStatusName}`,
-      responseStatusLine,
-      certificateStatusLine
-    );
-  } catch (error) {
-    return createOcspAssessment(false, 'OCSP responseStatus/certificate status undecodable', `OCSP responseStatus or certificate status could not be decoded: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-function createOcspAssessment(ok: boolean, summary: string, ...messages: string[]): OcspResponseAssessment {
-  return { ok, summary, transcript: messages.map(message => createTranscriptLine(message)) };
-}
-
-function getOcspResponseStatusName(status: number): string {
-  const names: Record<number, string> = {
-    0: 'successful',
-    1: 'malformedRequest',
-    2: 'internalError',
-    3: 'tryLater',
-    5: 'sigRequired',
-    6: 'unauthorized'
-  };
-  return names[status] ?? 'unknown';
-}
-
-function getOcspCertificateStatusName(status: number): string {
-  const names: Record<number, string> = {
-    0: 'good',
-    1: 'revoked',
-    2: 'unknown'
-  };
-  return names[status] ?? 'unknown';
-}
-
-function isHttpSuccess(status: number): boolean {
-  return status >= 200 && status < 400;
-}
-
-function findIssuerCertificateUrlForOcsp(root: CertificateTreeNode, ocspUrl: string): string | null {
-  let issuerUrl: string | null = null;
-  walkCertificateNodes(root, (node) => {
-    if (issuerUrl) return;
-    for (const resource of getNodeNetworkResources(node)) {
-      if (resource.url === ocspUrl) continue;
-      if (resource.kind === 'ca-issuers') {
-        issuerUrl = resource.url;
-        return;
-      }
-      const target = getValidationTargetLabel(createNetworkValidationPlan(node, resource));
-      if (target === 'AIA CA Issuers') {
-        issuerUrl = resource.url;
-        return;
-      }
-    }
-  });
-  return issuerUrl;
-}
-
-function walkCertificateNodes(node: CertificateTreeNode, visit: (node: CertificateTreeNode) => void): void {
-  visit(node);
-  for (const child of node.children ?? []) walkCertificateNodes(child, visit);
-}
-
-function parseCertificateForOcsp(bytes: Uint8Array, label: string): Certificate {
-  try {
-    return Certificate.fromBER(toArrayBuffer(normalizeCertificateBytes(bytes)));
-  } catch (error) {
-    throw new Error(`OCSP request cannot be generated because the ${label} could not be parsed as an X.509 certificate. ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-async function createOcspRequestBytes(certificate: Certificate, issuerCertificate: Certificate): Promise<Uint8Array> {
-  const ocspRequest = new OCSPRequest();
-  await ocspRequest.createForCertificate(certificate, {
-    hashAlgorithm: 'SHA-1',
-    issuerCertificate
-  });
-  return new Uint8Array(ocspRequest.toSchema(true).toBER(false));
 }
 
 function createTranscriptLine(message: string): string {

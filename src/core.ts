@@ -1,5 +1,6 @@
 import * as asn1js from 'asn1js';
 import { Certificate, ExtKeyUsage, InfoAccess, type Extension, type GeneralName, type RelativeDistinguishedNames } from 'pkijs';
+import { CERTGADGETS_VERSION } from './version';
 
 export type CertificateNodeKind =
   | 'certificate'
@@ -76,19 +77,35 @@ export type CertGadgetsCoreApi = {
   createDemoCertificate: () => CertificateDocument;
   createCertificateFromBytes: (bytes: Uint8Array, sourceName: string) => CertificateDocument;
   collectNetworkValidationPlans: (document: CertificateDocument) => NetworkValidationPlan[];
+  normalizeCertificateBytes: (bytes: Uint8Array) => Uint8Array;
+  derToPem: (label: string, bytes: Uint8Array) => string;
+  pemToDer: (text: string, expectedLabel?: string) => Uint8Array;
+  hexToBytes: (text: string) => Uint8Array;
   bytesToHexPreview: (bytes: Uint8Array, maxBytes?: number) => string;
+  bytesToBase64: (bytes: Uint8Array) => string;
+  base64ToBytes: (base64: string) => Uint8Array;
+  canDecodeAsn1: (bytes: Uint8Array) => boolean;
+  wrapBytesInOctetString: (bytes: Uint8Array) => Uint8Array;
+  toArrayBuffer: (bytes: Uint8Array) => ArrayBuffer;
 };
-
-const APP_VERSION = '0.0.0';
 
 const DEMO_CERTIFICATE_DER = mockBytes('www.example.test certificate');
 
 export const CertGadgetsCore: CertGadgetsCoreApi = {
-  version: APP_VERSION,
+  version: CERTGADGETS_VERSION,
   createDemoCertificate,
   createCertificateFromBytes,
   collectNetworkValidationPlans,
-  bytesToHexPreview
+  normalizeCertificateBytes,
+  derToPem,
+  pemToDer,
+  hexToBytes,
+  bytesToHexPreview,
+  bytesToBase64,
+  base64ToBytes,
+  canDecodeAsn1,
+  wrapBytesInOctetString,
+  toArrayBuffer
 };
 
 export function createDemoCertificate(): CertificateDocument {
@@ -480,19 +497,66 @@ function createDataUrl(mediaType: string, bytes: Uint8Array): string {
   return `data:${mediaType};base64,${bytesToBase64(bytes)}`;
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
 }
 
-function normalizeCertificateBytes(bytes: Uint8Array): Uint8Array {
+export function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+export function normalizeCertificateBytes(bytes: Uint8Array): Uint8Array {
   const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   const pemMatch = /-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/i.exec(text);
   if (!pemMatch) return bytes;
   const base64 = pemMatch[1].replace(/\s+/g, '');
-  const binary = atob(base64);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return base64ToBytes(base64);
+}
+
+export function derToPem(label: string, bytes: Uint8Array): string {
+  const base64 = bytesToBase64(bytes);
+  const lines = base64.match(/.{1,64}/g) ?? [];
+  return `-----BEGIN ${label}-----\n${lines.join('\n')}\n-----END ${label}-----\n`;
+}
+
+export function pemToDer(text: string, expectedLabel?: string): Uint8Array {
+  const blockPattern = /-----BEGIN ([^-]+)-----([\s\S]*?)-----END \1-----/g;
+  const blocks: Uint8Array[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = blockPattern.exec(text)) !== null) {
+    if (expectedLabel && match[1].toUpperCase() !== expectedLabel.toUpperCase()) continue;
+    const base64 = match[2].replace(/\s+/g, '');
+    if (!base64) throw new Error(`PEM block ${match[1]} has no base64 data.`);
+    blocks.push(base64ToBytes(base64));
+  }
+
+  if (blocks.length === 0) throw new Error(expectedLabel ? `${expectedLabel} PEM was not found.` : 'Could not read a PEM BEGIN/END block.');
+  return concatBytes(blocks);
+}
+
+export function hexToBytes(text: string): Uint8Array {
+  const hex = text.replace(/[^0-9a-f]/gi, '');
+  if (hex.length === 0 || hex.length % 2 !== 0) throw new Error('HEX input must contain an even number of hex digits.');
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  return bytes;
+}
+
+export function canDecodeAsn1(bytes: Uint8Array): boolean {
+  try {
+    const parsed = asn1js.fromBER(toArrayBuffer(bytes));
+    return parsed.offset !== -1 && parsed.offset === bytes.byteLength;
+  } catch {
+    return false;
+  }
+}
+
+export function wrapBytesInOctetString(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(new asn1js.OctetString({ valueHex: toArrayBuffer(bytes) }).toBER(false));
 }
 
 function createValidityDer(certificate: Certificate): Uint8Array {
@@ -800,10 +864,21 @@ function getOidName(oid: string): string {
   return names[oid] ? `${names[oid]} (${oid})` : oid;
 }
 
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
+}
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  const totalLength = parts.reduce((total, part) => total + part.byteLength, 0);
+  const bytes = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  return bytes;
 }
 
 function toBytes(buffer: ArrayBuffer): Uint8Array {

@@ -167,14 +167,38 @@ Current version: 0.0.0
 - Builds the certificate tree model used by the browser app without depending on
   DOM APIs.
 - Collects explicit network-validation plans from a parsed certificate document.
-- Provides a `bytesToHexPreview` helper for compact byte display.
+- Provides reusable DER, PEM, HEX, Base64, ASN.1, and ArrayBuffer helpers.
 - Keeps host-specific behavior, file access, dialogs, network access, and
   Webview lifecycle outside the core module.
+- Reads the package version from the build-time package metadata, so the
+  exported `CertGadgetsCore.version` value stays aligned with `package.json`.
+
+### CertGadgetsValidation API
+
+- Exposes `CertGadgetsValidation` from `@pkistudio/certgadgets/validation` as a
+  UI-independent helper API for explicit network-assisted validation flows.
+- Creates network validation plans for certificate tree items with AIA, OCSP,
+  CRL, or generic HTTP resources.
+- Prepares OCSP validation plans by fetching the issuer certificate through a
+  host-provided callback and generating an `application/ocsp-request` body.
+- Assesses HTTP validation responses and records target-specific transcript
+  lines for OCSP, CRL Distribution Points, AIA CA Issuers, and generic AIA
+  resources.
+- Parses OCSP response status and checks matching SingleResponse certificate
+  status when target and issuer certificate bytes are available.
+- Classifies validation request and response artifacts as certificate, ASN.1, or
+  raw bytes.
+- Keeps actual network fetching, user confirmation, persistence, and UI display
+  outside the validation module.
+- Uses the same build-time version source as `CertGadgetsCore`, so
+  `CertGadgetsValidation.version` also stays aligned with `package.json`.
 
 ### npm Package API
 
 - Exports the core helper API from `@pkistudio/certgadgets` and
   `@pkistudio/certgadgets/core`.
+- Exports network-assisted validation helpers from
+  `@pkistudio/certgadgets/validation`.
 - Exports the browser app initializer from `@pkistudio/certgadgets/app`.
 - Exports app styling from `@pkistudio/certgadgets/styles.css`.
 - Lets Webview hosts provide network confirmation and fetch callbacks without
@@ -256,6 +280,45 @@ const plans = CertGadgetsCore.collectNetworkValidationPlans(certificate);
 
 The returned validation plans describe external resources that a host may choose
 to offer as explicit user actions.
+
+Use the validation helpers directly when a host application owns confirmation,
+networking, and result display:
+
+```ts
+import { CertGadgetsCore } from '@pkistudio/certgadgets';
+import type { NetworkValidationPlan } from '@pkistudio/certgadgets';
+import { CertGadgetsValidation, type NetworkFetchResult } from '@pkistudio/certgadgets/validation';
+
+const certificate = CertGadgetsCore.createCertificateFromBytes(bytes, 'site.cer');
+const [plan] = CertGadgetsCore.collectNetworkValidationPlans(certificate);
+const fetchResource = async ({ url, method, requestBytes, requestMediaType, acceptMediaType }: NetworkValidationPlan): Promise<NetworkFetchResult> => {
+  const response = await fetch(url, {
+    method: method ?? (requestBytes ? 'POST' : 'GET'),
+    headers: {
+      ...(requestMediaType ? { 'Content-Type': requestMediaType } : {}),
+      ...(acceptMediaType ? { Accept: acceptMediaType } : {})
+    },
+    body: requestBytes
+  });
+  const responseBytes = new Uint8Array(await response.arrayBuffer());
+  return {
+    status: response.status,
+    bytes: responseBytes,
+    mediaType: response.headers.get('Content-Type') ?? undefined
+  };
+};
+
+if (plan) {
+  const preparedPlan = await CertGadgetsValidation.prepareNetworkValidationPlan(plan, {
+    document: certificate,
+    fetchNetworkResource: fetchResource
+  });
+
+  const result = await fetchResource(preparedPlan);
+  const assessment = await CertGadgetsValidation.assessValidationContent(preparedPlan, result);
+  console.log(assessment.status, assessment.transcript);
+}
+```
 
 Mount the browser application from an embedded Webview or browser app:
 
