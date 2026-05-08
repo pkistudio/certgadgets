@@ -54,9 +54,9 @@
     "vite": "^7.0.0"
   },
   "dependencies": {
+    "@pkistudio/pkistudiojs": "^0.5.0",
     "asn1js": "^3.0.10",
     "pkijs": "^3.4.0",
-    "pkistudiojs": "^0.4.1",
     "pvtsutils": "^1.3.6"
   }
 }

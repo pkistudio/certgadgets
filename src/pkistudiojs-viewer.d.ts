@@ -1,4 +1,9 @@
-declare module 'pkistudiojs/viewer' {
+declare module '@pkistudio/pkistudiojs/oid-resolver' {
+  const PkiStudioOidResolver: (oid: string) => string;
+  export default PkiStudioOidResolver;
+}
+
+declare module '@pkistudio/pkistudiojs/viewer' {
   export type PkiStudioViewerInstance = {
     close: () => void;
     loadBytes: (bytes: Uint8Array, notice?: string) => void;
@@ -8,7 +13,7 @@ declare module 'pkistudiojs/viewer' {
 
   const PkiStudio: {
     version?: string;
-    init: (options: { mount: string | Element; fullscreen?: boolean; newWindowUrl?: string; oidUrl?: string }) => PkiStudioViewerInstance;
+    init: (options: { mount: string | Element; fullscreen?: boolean; newWindowUrl?: string; oidResolver?: (oid: string) => string }) => PkiStudioViewerInstance;
   };
 
   export default PkiStudio;

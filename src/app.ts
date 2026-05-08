@@ -1,7 +1,8 @@
 import './styles.css';
 import * as asn1js from 'asn1js';
+import PkiStudioOidResolver from '@pkistudio/pkistudiojs/oid-resolver';
+import PkiStudio, { type PkiStudioViewerInstance } from '@pkistudio/pkistudiojs/viewer';
 import { Certificate, OCSPRequest, OCSPResponse } from 'pkijs';
-import PkiStudio, { type PkiStudioViewerInstance } from 'pkistudiojs/viewer';
 import {
   CertGadgetsCore,
   type CertificateNetworkResource,
@@ -10,7 +11,6 @@ import {
   type NetworkValidationPlan
 } from './core';
 
-const PKISTUDIO_OIDS_URL = new URL('../node_modules/pkistudiojs/app/static/oids.json', import.meta.url).href;
 const TREE_ITEM_TRUNCATE_THRESHOLD = 255;
 const TREE_ITEM_TEXT_LIMIT = 250;
 
@@ -322,7 +322,7 @@ export function initCertificateGadgets(options: InitCertificateGadgetsOptions = 
 
   function bootViewer(): void {
     try {
-      viewer = PkiStudio.init({ mount: viewerMount, oidUrl: PKISTUDIO_OIDS_URL, newWindowUrl: 'viewer.html' });
+      viewer = PkiStudio.init({ mount: viewerMount, oidResolver: PkiStudioOidResolver, newWindowUrl: 'viewer.html' });
       applyEmbeddedViewerStyles(viewer);
       applyReadonlyViewerState(viewer);
       listenForReadonlyViewerActions(viewer);
@@ -1075,7 +1075,7 @@ function getDisplayDetails(node: CertificateTreeNode): Array<{ label: string; va
       const validity = parseValidityRange(detail.value);
       if (!validity) return [detail];
       return [
-        { label: 'Validity', value: `from ${validity.from} ～ to ${validity.to}` },
+        { label: 'Validity', value: `${validity.from} ～ ${validity.to}` },
         { label: 'Validity days', value: `${validity.days} days` }
       ];
     }
