@@ -13,7 +13,7 @@ object to the embedded PkiStudioJS ASN.1 viewer.
 > [GitHub Pages network validation](#github-pages-network-validation) for an
 > example proxy setup.
 
-Current version: 0.1.1
+Current version: 0.1.2
 
 ## Features
 
@@ -157,8 +157,9 @@ Current version: 0.1.1
 - Embeds the npm-provided PkiStudioJS viewer directly in the right pane.
 - Displays the selected certificate, TBSCertificate field, extension, signature
   algorithm, or signature value DER object.
-- Keeps the embedded viewer in read-only mode for certificate investigation.
-- Disables PkiStudioJS viewer actions that would edit, delete, load, or close
+- Keeps the embedded viewer constrained for certificate investigation while
+  allowing PkiStudioJS Edit actions such as tag editing.
+- Disables PkiStudioJS viewer actions that would insert, delete, load, or close
   DER data inside the embedded viewer.
 - Keeps PkiStudioJS Save and New Window behavior available for the currently
   displayed DER object.
