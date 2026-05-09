@@ -1,0 +1,16 @@
+{
+  "name": "certgadgets",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/git-lfs:1": {}
+  },
+  "postCreateCommand": "git lfs install",
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": {
+      "label": "certgadgets",
+      "onAutoForward": "openPreview"
+    }
+  }
+}
