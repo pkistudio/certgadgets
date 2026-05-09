@@ -1,6 +1,6 @@
 {
   "name": "@pkistudio/certgadgets",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Browser certificate investigation tools and reusable Certificate Gadgets API.",
   "type": "module",
   "main": "./dist/core.js",

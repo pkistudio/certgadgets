@@ -1215,6 +1215,7 @@ function applyEmbeddedViewerStyles(instance: PkiStudioViewerInstance): void {
     :host(.certgadgets-viewer-readonly) [data-action="load-clipboard-pem"],
     :host(.certgadgets-viewer-readonly) [data-action="load-clipboard-hex"],
     :host(.certgadgets-viewer-readonly) [data-action="close"],
+    :host(.certgadgets-viewer-readonly) [data-node-action="edit"],
     :host(.certgadgets-viewer-readonly) [data-node-action="insert-before"],
     :host(.certgadgets-viewer-readonly) [data-node-action="insert-before-new-item"],
     :host(.certgadgets-viewer-readonly) [data-node-action="insert-before-clipboard-hex"],
@@ -1227,6 +1228,7 @@ function applyEmbeddedViewerStyles(instance: PkiStudioViewerInstance): void {
     .certgadgets-viewer-readonly [data-action="load-clipboard-pem"],
     .certgadgets-viewer-readonly [data-action="load-clipboard-hex"],
     .certgadgets-viewer-readonly [data-action="close"],
+    .certgadgets-viewer-readonly [data-node-action="edit"],
     .certgadgets-viewer-readonly [data-node-action="insert-before"],
     .certgadgets-viewer-readonly [data-node-action="insert-before-new-item"],
     .certgadgets-viewer-readonly [data-node-action="insert-before-clipboard-hex"],
@@ -1275,7 +1277,8 @@ function isReadonlyViewerAction(button: HTMLButtonElement): boolean {
   if (action === 'toggle-load-menu' || action === 'open' || action === 'load-clipboard-pem' || action === 'load-clipboard-hex' || action === 'close') return true;
 
   const nodeAction = button.dataset.nodeAction;
-  return nodeAction === 'delete' ||
+  return nodeAction === 'edit' ||
+    nodeAction === 'delete' ||
     nodeAction === 'add-child' ||
     nodeAction === 'add-child-new-item' ||
     nodeAction === 'add-child-clipboard-hex' ||
