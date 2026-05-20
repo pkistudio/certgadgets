@@ -1,0 +1,108 @@
+name: Publish release to WordPress
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Publish release post to WordPress
+        env:
+          WPCOM_ACCESS_TOKEN: ${{ secrets.WPCOM_ACCESS_TOKEN }}
+          WPCOM_SITE_ID: ${{ secrets.WPCOM_SITE_ID }}
+          WP_RELEASE_CATEGORY_ID: ${{ vars.WP_RELEASE_CATEGORY_ID }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+          RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          import json
+          import html
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ["WPCOM_ACCESS_TOKEN"]
+          site_id = os.environ["WPCOM_SITE_ID"]
+
+          tag = os.environ["RELEASE_TAG"]
+          name = os.environ.get("RELEASE_NAME") or tag
+          url = os.environ["RELEASE_URL"]
+          body = os.environ.get("RELEASE_BODY") or ""
+          published_at = os.environ.get("RELEASE_PUBLISHED_AT") or ""
+          category_id = os.environ.get("WP_RELEASE_CATEGORY_ID") or ""
+
+          def make_slug(text):
+              text = text.lower()
+              text = re.sub(r"[^a-z0-9]+", "-", text)
+              return text.strip("-")
+
+          def wp_request(method, path, payload=None):
+              api_url = f"https://public-api.wordpress.com/wp/v2/sites/{site_id}{path}"
+
+              data = None
+              if payload is not None:
+                  data = json.dumps(payload).encode("utf-8")
+
+              req = urllib.request.Request(api_url, data=data, method=method)
+              req.add_header("Authorization", f"Bearer {token}")
+              req.add_header("Content-Type", "application/json")
+
+              with urllib.request.urlopen(req) as res:
+                  return json.loads(res.read().decode("utf-8"))
+
+          slug = make_slug(f"certgadgets-{tag}")
+
+          title = f"Certificate Gadgets {tag} をリリースしました"
+
+          release_body = body.strip() or "詳細はGitHub Releaseを参照してください。"
+
+          content = f"""
+          <p><strong>Certificate Gadgets の新しいリリースを公開しました。</strong></p>
+
+          <ul>
+            <li>リリース名: {html.escape(name)}</li>
+            <li>タグ: <code>{html.escape(tag)}</code></li>
+            <li>公開日時: {html.escape(published_at)}</li>
+            <li><a href="{html.escape(url)}">GitHub Release を見る</a></li>
+          </ul>
+
+          <h3>リリースノート</h3>
+          <pre>{html.escape(release_body)}</pre>
+          """
+
+          payload = {
+              "title": title,
+              "slug": slug,
+              "content": content,
+              "excerpt": f"Certificate Gadgets {tag} のリリース情報です。",
+              "status": "publish"
+          }
+
+          if category_id:
+              payload["categories"] = [int(category_id)]
+
+          query = urllib.parse.urlencode({
+              "slug": slug,
+              "status": "publish,draft,pending,private,future"
+          }, safe=",")
+
+          existing = wp_request("GET", f"/posts?{query}")
+
+          if existing:
+              post_id = existing[0]["id"]
+              result = wp_request("POST", f"/posts/{post_id}", payload)
+              print("Updated:", result.get("link"))
+          else:
+              result = wp_request("POST", "/posts", payload)
+              print("Created:", result.get("link"))
+          PY

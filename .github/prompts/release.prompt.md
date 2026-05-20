@@ -1,5 +1,5 @@
 ---
-description: "Use when: running the certgadgets release workflow, including version bump, tag, GitHub Release, npm first publish, scoped public package access, GitHub Pages status, and Actions checks."
+description: "Use when: running the certgadgets release workflow, including version bump, tag, GitHub Release, WordPress release post, npm first publish, scoped public package access, GitHub Pages status, and Actions checks."
 name: "certgadgets release workflow"
 argument-hint: "[version|TBD] <short release summary>"
 agent: "agent"
@@ -7,7 +7,7 @@ agent: "agent"
 
 # certgadgets Release Workflow
 
-Run the standard certgadgets release workflow from local release preparation through GitHub Release, npm publication, and post-publication verification.
+Run the standard certgadgets release workflow from local release preparation through GitHub Release, WordPress release post, npm publication, and post-publication verification.
 
 Expected invocation examples:
 
@@ -43,6 +43,7 @@ Confirmation gates:
 - This prompt is a workflow guide only and does not grant repository permissions.
 - Push, tag, release, and npm operations require the user or token to have the needed permissions.
 - npm publication requires package ownership for `@pkistudio/certgadgets` or a configured npm Trusted Publisher for this repository.
+- WordPress release posting requires repository secrets `WPCOM_ACCESS_TOKEN` and `WPCOM_SITE_ID`; `WP_RELEASE_CATEGORY_ID` is an optional repository variable.
 - Work in the current repository only.
 - Check current branch, remote, tags, and working tree before making changes.
 - Never discard uncommitted user changes.
@@ -125,6 +126,7 @@ Use this shape for GitHub Release notes unless the user supplies a more specific
    - Create an annotated tag on the release commit.
    - Push the tag only after Gate 3 approval.
    - Create a GitHub Release named `vX.Y.Z`, latest stable, not draft and not prerelease unless instructed otherwise.
+   - Confirm the `Publish release to WordPress` workflow starts after the GitHub Release is published.
 
 6. Publish npm
    - Preferred first publish command from an authenticated npm owner account:
@@ -143,6 +145,7 @@ Use this shape for GitHub Release notes unless the user supplies a more specific
    - Verify:
      - GitHub tag exists on the release commit.
      - GitHub Release is published.
+   - WordPress release post workflow completed or any posting failure is clearly reported.
      - `npm view @pkistudio/certgadgets@X.Y.Z version dist-tags dist.tarball --json` returns the expected version.
      - A fresh temporary install can import the public entry points when practical.
      - GitHub Pages deployment from any Pages workflow completed, failed, or is clearly reported as not configured.
@@ -153,6 +156,7 @@ Use this shape for GitHub Release notes unless the user supplies a more specific
 Keep the final response concise and include:
 
 - Release link and tag
+- WordPress release post status
 - npm package/version status
 - Verification summary
 - Pages and Actions status

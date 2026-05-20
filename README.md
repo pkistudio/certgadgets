@@ -13,7 +13,7 @@ object to the embedded PkiStudioJS ASN.1 viewer.
 > [GitHub Pages network validation](#github-pages-network-validation) for an
 > example proxy setup.
 
-Current version: 0.1.3
+Current version: 0.1.4
 
 ## Features
 
