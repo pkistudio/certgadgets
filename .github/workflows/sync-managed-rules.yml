@@ -1,0 +1,40 @@
+name: Sync managed rules
+
+on:
+  workflow_dispatch:
+    inputs:
+      managedrules_ref:
+        description: managedrules ref to sync from
+        required: false
+        default: main
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout product repository
+        uses: actions/checkout@v4
+        with:
+          path: target
+          fetch-depth: 0
+
+      - name: Checkout managed rules
+        uses: actions/checkout@v4
+        with:
+          repository: pkistudio/managedrules
+          ref: ${{ inputs.managedrules_ref || 'main' }}
+          path: managedrules
+
+      - name: Sync managed rules
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node managedrules/scripts/sync-managed-rules.mjs \
+            --manifest "managedrules/manifests/${{ github.event.repository.name }}.yml" \
+            --target-dir target
