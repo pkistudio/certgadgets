@@ -17,6 +17,13 @@
           "endsPattern": "Local:.*http://localhost:5173/"
         }
       }
+    },
+    {
+      "label": "Start certgadgets wiki",
+      "type": "shell",
+      "command": "gollum --host 0.0.0.0 --port 4567 /workspaces/certgadgets.wiki",
+      "isBackground": true,
+      "problemMatcher": []
     }
   ]
 }
