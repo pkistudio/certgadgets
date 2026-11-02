@@ -31,6 +31,7 @@
 - npm publish command in workflow: `npm publish --provenance --access public`
 - npm publication requires explicit user approval.
 - GitHub Release requires explicit user approval.
+- GitHub Release title/name pattern: `<version>`.
 - Stable published tags should have a GitHub Release marked as latest unless the user instructs otherwise.
 - WordPress post workflow: `.github/workflows/publish-release-to-wordpress.yml`
 - WordPress post title pattern: `Certificate Gadgets <tag> をリリースしました`
@@ -39,6 +40,7 @@
 
 - Pages workflow: `.github/workflows/pages.yml`
 - Pages artifact path: `dist`
+- Wiki source path in repository: `wikisrc/`
 - Wiki path in Codespaces: `/workspaces/certgadgets.wiki`
 - Keep Wiki work separate from main repository work unless explicitly requested.
 
